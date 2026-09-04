@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="栖迟 - 一个记录思考、生活与技术的个人博客" />
+    <title>栖迟 · 个人博客</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#home" aria-label="返回首页">
+        <span class="brand-mark">栖</span>
+        <span>栖迟</span>
+      </a>
+      <nav class="main-nav" aria-label="主导航">
+        <a href="#home" data-nav="home">首页</a>
+        <a href="#archive" data-nav="archive">文章</a>
+        <a href="#timeline" data-nav="timeline">时间轴</a>
+        <a href="#friends" data-nav="friends">友链</a>
+        <a href="#guestbook" data-nav="guestbook">留言</a>
+        <a href="#announcement" data-nav="announcement">公告栏</a>
+        <a href="#co-create" data-nav="co-create">共创界面</a>
+        <button class="nav-button" data-action="reward">微信打赏</button>
+      </nav>
+      <div class="header-actions">
+        <button class="icon-button" data-action="search" aria-label="搜索文章" title="搜索文章">⌕</button>
+        <button class="avatar-button" data-action="profile" aria-label="登录或打开个人资料"><span data-header-avatar>林</span></button>
+        <span class="auth-status" data-auth-status>访客</span>
+      </div>
+    </header>
+
+    <main id="app"></main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="modal-root"></div>
+    <aside class="desktop-pet" id="desktop-pet" aria-label="宠物助手">
+      <div class="pet-bubble" id="pet-bubble" hidden>
+        <strong>纸飞机助手</strong>
+        <p id="pet-message">今天也要慢慢写下想说的话。</p>
+        <div class="pet-actions">
+          <button type="button" data-pet-action="encourage">鼓励我</button>
+          <button type="button" data-pet-action="guestbook">去留言</button>
+          <button type="button" data-pet-action="view-messages" data-admin-pet-action hidden>查看留言</button>
+          <button type="button" data-pet-action="close">收起</button>
+        </div>
+      </div>
+      <button class="pet-character" id="pet-character" type="button" aria-label="打开宠物助手" title="点击和宠物助手互动">
+        <img src="./assets/pet-helper.jpg" alt="纸飞机上的宠物助手" draggable="false" />
+      </button>
+      <span class="pet-status">陪你写博客</span>
+    </aside>
+    <script src="./app.js"></script>
+  </body>
+</html>
