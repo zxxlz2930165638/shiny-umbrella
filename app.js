@@ -26,6 +26,10 @@ store.guestbook = (store.guestbook || []).map((message, index) => ({
   status: message.status || "approved"
 }));
 store.backupFriends = store.backupFriends || [];
+store.friends = (store.friends || []).map((friend, index) => ({
+  ...friend,
+  id: friend.id || `friend-${index + 1}`
+}));
 store.announcement = store.announcement || null;
 store.reward = store.reward || { image: "" };
 if (!Array.isArray(store.coCreateArticles)) store.coCreateArticles = seed.coCreateArticles.map(item => ({ ...item, body: [...item.body], media: [...item.media] }));
@@ -60,6 +64,7 @@ function save() {
 function saveAuth() { sessionStorage.setItem("qichi-auth", JSON.stringify(auth)); }
 function isAdmin() { return auth.mode === "admin"; }
 function isPublished(article) { return article.status !== "draft"; }
+function visibleArticles() { return isAdmin() ? store.articles : store.articles.filter(isPublished); }
 function openMediaDatabase() {
   if (mediaDatabasePromise) return mediaDatabasePromise;
   mediaDatabasePromise = new Promise((resolve, reject) => {
@@ -131,7 +136,7 @@ function setPage(page) {
   if (location.hash === `#${page}`) render({ animate: true });
   else location.hash = page;
 }
-function tags() { return ["全部", ...new Set(store.articles.flatMap(a => a.tags))]; }
+function tags() { return ["全部", ...new Set(visibleArticles().flatMap(a => a.tags))]; }
 function navState() {
   document.querySelectorAll("[data-nav]").forEach(link => link.classList.toggle("active", link.dataset.nav === currentPage));
   const status = document.querySelector("[data-auth-status]");
@@ -175,7 +180,7 @@ function articleCard(article) {
   return `<article class="article-card"><a href="#article-${article.id}">
     <div class="article-cover"><img src="${articleCover(article)}" alt="${article.title}的文章封面" /></div>
     <div class="article-body"><div class="article-meta"><span>${article.date}</span><span>${article.read} min read</span>${article.status === "draft" ? `<span class="draft-label">草稿</span>` : ""}</div>
-    <h3>${article.title}</h3><p>${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div></div></a>${isAdmin() && isPublished(article) ? `<button class="delete-article" data-delete="${article.id}" aria-label="删除文章" title="删除文章">删除</button>` : ""}</article>`;
+    <h3>${article.title}</h3><p>${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div></div></a>${isAdmin() ? `<button class="delete-article" data-delete="${article.id}" aria-label="${isPublished(article) ? "删除文章" : "删除草稿"}" title="${isPublished(article) ? "删除文章" : "删除草稿"}">${isPublished(article) ? "删除" : "删除草稿"}</button>` : ""}</article>`;
 }
 function articleMediaMarkup(article) {
   if (!article.media?.length) return "";
@@ -191,28 +196,34 @@ function formatAnnouncementTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date).replace(/\//g, "-");
 }
 function renderHome() {
-  const latest = store.articles.slice(0, 3);
+  const articles = visibleArticles();
+  const latest = articles.slice(0, 3);
   return layout(`<section class="hero home-hero"><div class="hero-content"><div class="eyebrow">A QUIET PLACE FOR LOUD THOUGHTS</div><h1>记录生活，<br />也记录正在成为的自己。</h1><p>${store.profile.bio} 这里是我的个人博客，写设计、技术、阅读，以及那些值得被记住的小事。</p><div class="hero-actions"><a class="button button-primary" href="#archive">阅读文章</a><button class="button button-ghost" data-action="guestbook">留下足迹</button><button class="button button-ghost" data-action="recommend">推荐</button></div></div><button class="home-scroll" type="button" data-action="home-next" aria-label="查看首页内容" title="查看首页内容"><span aria-hidden="true">↓</span></button></section>
     <div class="home-content" id="home-content"><section class="announcement-home"><div class="announcement-home-inner"><div><span class="eyebrow">ANNOUNCEMENT</span><h2>${store.announcement ? store.announcement.title : "公告栏"}</h2><p>${store.announcement ? store.announcement.body : "暂无公告"}</p></div><a class="text-link" href="#announcement">查看公告 →</a></div></section>
     <section class="section"><div class="section-heading"><div><h2>最近写下</h2><p>一些关于生活、设计和持续学习的记录</p></div><a class="text-link" href="#archive">查看全部文章 →</a></div><div class="article-grid">${latest.map(articleCard).join("")}</div></section>
-    <section class="feature-band"><div class="section feature-layout"><div class="feature-note"><div class="eyebrow">NOTES FROM THE DESK</div><h2>愿你在这里，<br />找到一点自己的节奏。</h2><p>博客不是答案集，而是一张持续展开的地图。我把走过的路、遇到的问题和偶尔闪光的念头放在这里，等它们与另一个人相遇。</p><a class="text-link" href="#timeline">沿着时间轴走走 →</a></div><div class="stats"><div class="stat"><strong>${store.articles.length}</strong><span>篇文章</span></div><div class="stat"><strong>${store.articles.reduce((sum, a) => sum + a.likes, 0)}</strong><span>次喜欢</span></div><div class="stat"><strong>${store.guestbook.length}</strong><span>位访客</span></div></div></div></section></div>`);
+    <section class="feature-band"><div class="section feature-layout"><div class="feature-note"><div class="eyebrow">NOTES FROM THE DESK</div><h2>愿你在这里，<br />找到一点自己的节奏。</h2><p>博客不是答案集，而是一张持续展开的地图。我把走过的路、遇到的问题和偶尔闪光的念头放在这里，等它们与另一个人相遇。</p><a class="text-link" href="#timeline">沿着时间轴走走 →</a></div><div class="stats"><div class="stat"><strong>${articles.length}</strong><span>篇文章</span></div><div class="stat"><strong>${articles.reduce((sum, a) => sum + a.likes, 0)}</strong><span>次喜欢</span></div><div class="stat"><strong>${store.guestbook.length}</strong><span>位访客</span></div></div></div></section></div>`);
 }
 function renderArchive() {
   const q = new URLSearchParams(location.hash.split("?")[1] || "").get("q") || "";
-  const filtered = store.articles.filter(a => (activeFilter === "全部" || a.tags.includes(activeFilter)) && `${a.title}${a.summary}`.includes(q));
+  const filtered = visibleArticles().filter(a => (activeFilter === "全部" || a.tags.includes(activeFilter)) && `${a.title}${a.summary}`.includes(q));
   return layout(`<section class="page-top"><div class="page-top-inner"><div><h1>文章</h1><p>把想法写下来，事情就开始变得清晰。</p></div>${isAdmin() ? `<button class="button button-primary" data-action="publish">发布文章</button>` : ""}</div></section><section class="section"><div class="toolbar"><div class="filter-list">${tags().map(t => `<button class="filter ${activeFilter === t ? "selected" : ""}" data-filter="${t}">${t}</button>`).join("")}</div><input class="search-input" id="article-search" placeholder="搜索文章..." value="${q}" /></div><div class="article-grid">${filtered.length ? filtered.map(articleCard).join("") : `<div class="empty">暂无相关文章</div>`}</div></section>`);
 }
 function renderArticle(id) {
   const article = store.articles.find(a => a.id === Number(id));
-  if (!article) return layout(`<section class="section"><div class="empty">这篇文章不可访问。</div></section>`);
+  if (!article || (!isAdmin() && !isPublished(article))) return layout(`<section class="section"><div class="empty">这篇文章不可访问。</div></section>`);
   const comments = store.comments.filter(c => c.articleId === article.id);
-  return layout(`<section class="section"><article class="detail"><div class="detail-topline"><a class="text-link" href="#archive">← 返回文章列表</a>${isAdmin() ? `<div class="detail-admin-actions"><button class="button button-light" data-action="edit-article" data-id="${article.id}">编辑文章</button>${isPublished(article) ? `<button class="delete-article" data-delete="${article.id}">删除文章</button>` : ""}</div>` : ""}</div><div class="article-meta" style="margin-top:34px"><span>${article.date}</span><span>${article.read} min read</span>${article.updatedAt && article.updatedAt !== article.date ? `<span>更新于 ${formatAnnouncementTime(article.updatedAt)}</span>` : ""}</div><h1>${article.title}</h1><p class="lead">${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div><div class="detail-content">${article.body.map(p => `<p>${p}</p>`).join("")}${articleMediaMarkup(article)}</div><div class="interaction"><button class="${article.liked ? "active" : ""}" data-like="${article.id}">♡ ${article.liked ? "已喜欢" : "喜欢"} · ${article.likes}</button><button data-action="comment" data-id="${article.id}">评论 · ${comments.length}</button></div><h2>评论</h2><div class="comment-list">${comments.length ? comments.map(c => `<div class="comment"><div class="comment-head"><span>${c.name}</span><span>刚刚</span></div><p>${c.text}</p></div>`).join("") : `<div class="empty">还没有评论，来说点什么吧。</div>`}</div></article></section>`);
+  return layout(`<section class="section"><article class="detail"><div class="detail-topline"><a class="text-link" href="#archive">← 返回文章列表</a>${isAdmin() ? `<div class="detail-admin-actions">${!isPublished(article) ? `<button class="button button-primary" data-publish-article="${article.id}">发布文章</button>` : ""}<button class="button button-light" data-action="edit-article" data-id="${article.id}">编辑文章</button><button class="delete-article" data-delete="${article.id}">${isPublished(article) ? "删除文章" : "删除草稿"}</button></div>` : ""}</div><div class="article-meta" style="margin-top:34px"><span>${article.date}</span><span>${article.read} min read</span>${article.status === "draft" ? `<span class="draft-label">草稿</span>` : ""}${article.updatedAt && article.updatedAt !== article.date ? `<span>更新于 ${formatAnnouncementTime(article.updatedAt)}</span>` : ""}</div><h1>${article.title}</h1><p class="lead">${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div><div class="detail-content">${article.body.map(p => `<p>${p}</p>`).join("")}${articleMediaMarkup(article)}</div><div class="interaction"><button class="${article.liked ? "active" : ""}" data-like="${article.id}">♡ ${article.liked ? "已喜欢" : "喜欢"} · ${article.likes}</button><button data-action="comment" data-id="${article.id}">评论 · ${comments.length}</button></div><h2>评论</h2><div class="comment-list">${comments.length ? comments.map(c => `<div class="comment"><div class="comment-head"><span>${c.name}</span><span>刚刚</span></div><p>${c.text}</p></div>`).join("") : `<div class="empty">还没有评论，来说点什么吧。</div>`}</div></article></section>`);
 }
 function renderTimeline() {
-  return layout(`<section class="page-top"><h1>时间轴</h1><p>按照时间，回看一路写下的痕迹。</p></section><section class="section"><div class="timeline">${[...store.articles].sort((a,b) => b.date.localeCompare(a.date)).map(a => `<div class="timeline-item"><div class="timeline-date">${a.date.slice(0,7)}</div><a class="timeline-card" href="#article-${a.id}"><h3>${a.title}</h3><p>${a.summary}</p></a></div>`).join("")}</div></section>`);
+  return layout(`<section class="page-top"><h1>时间轴</h1><p>按照时间，回看一路写下的痕迹。</p></section><section class="section"><div class="timeline">${[...visibleArticles()].sort((a,b) => b.date.localeCompare(a.date)).map(a => `<div class="timeline-item"><div class="timeline-date">${a.date.slice(0,7)}</div><a class="timeline-card" href="#article-${a.id}"><h3>${a.title}</h3><p>${a.summary}</p></a></div>`).join("")}</div></section>`);
 }
 function renderFriends() {
-  return layout(`<section class="page-top"><div class="page-top-inner"><div><h1>友链</h1><p>一些我愿意反复访问的地方。</p></div>${isAdmin() ? `<button class="button button-primary" data-action="friend-add">添加好友</button>` : ""}</div></section><section class="section"><div class="friends-grid">${store.friends.map(f => `<a class="friend" href="${f.url || "#"}" ${f.url ? 'target="_blank" rel="noreferrer"' : 'data-action="friend"'}><img class="friend-avatar" src="${f.avatar}" alt="" /><div><h3>${f.name}</h3><p>${f.desc || f.url || ""}</p></div></a>`).join("")}</div><div style="margin-top:46px"><button class="button button-primary" data-action="friend-backup">留名</button></div></section>`);
+  const friends = store.friends.map(friend => {
+    const info = `<h3>${friend.name}</h3><p>${friend.desc || friend.url || ""}</p>`;
+    if (!isAdmin()) return `<a class="friend" href="${friend.url || "#"}" ${friend.url ? 'target="_blank" rel="noreferrer"' : 'data-action="friend"'}><img class="friend-avatar" src="${friend.avatar}" alt="" /><div class="friend-info">${info}</div></a>`;
+    return `<div class="friend admin-friend"><button class="friend-avatar-button" data-friend-delete="${friend.id}" aria-label="删除好友${friend.name}" title="删除好友"><img class="friend-avatar" src="${friend.avatar}" alt="${friend.name}的头像" /></button>${friend.url ? `<a class="friend-info" href="${friend.url}" target="_blank" rel="noreferrer">${info}</a>` : `<div class="friend-info">${info}</div>`}</div>`;
+  }).join("");
+  return layout(`<section class="page-top"><div class="page-top-inner"><div><h1>友链</h1><p>一些我愿意反复访问的地方。</p></div>${isAdmin() ? `<button class="button button-primary" data-action="friend-add">添加好友</button>` : ""}</div></section><section class="section"><div class="friends-grid">${friends}</div><div style="margin-top:46px"><button class="button button-primary" data-action="friend-backup">留名</button></div></section>`);
 }
 function renderFriendBackup() {
   return layout(`<section class="page-top"><div class="page-top-inner"><div><h1>好友备用列表</h1><p>留下你的博客信息，和喜欢记录生活的人彼此发现。</p></div><button class="button button-primary" data-action="friend-sign">留名</button></div></section><section class="section"><div class="backup-note">无需登录，填写公开的博客信息即可留名。管理员点击头像可进行列表管理。</div><div class="friends-grid">${store.backupFriends.length ? store.backupFriends.map(friend => `<div class="friend backup-friend"><button class="backup-avatar-button" data-backup-manage="${friend.id}" aria-label="管理${friend.name}的留名" title="${isAdmin() ? "管理留名" : "查看头像"}"><img class="friend-avatar" src="${friend.avatar}" alt="${friend.name}的头像" /></button><div class="friend-info"><h3>${friend.name}</h3><a href="${friend.url}" target="_blank" rel="noreferrer">${friend.url}</a></div></div>`).join("") : `<div class="empty">备用列表还没有朋友，欢迎第一个留下信息。</div>`}</div></section>`);
@@ -402,8 +413,29 @@ document.addEventListener("click", e => {
     e.preventDefault();
     e.stopPropagation();
     const article = store.articles.find(item => item.id === Number(deleteButton.dataset.delete));
-    if (!article || !isAdmin() || !isPublished(article)) return showToast("无权删除文章");
-    modal("确认删除文章", `<p class="confirm-copy">删除后文章和相关评论都将被移除，且无法恢复。</p><div class="modal-actions"><button class="button button-light" data-close>取消</button><button class="button button-danger" data-confirm-delete="${article.id}">确认删除</button></div>`);
+    if (!article || !isAdmin()) return showToast("无权删除文章");
+    const label = isPublished(article) ? "文章" : "草稿";
+    modal(`确认删除${label}`, `<p class="confirm-copy">删除后${label}和相关评论都将被移除，且无法恢复。</p><div class="modal-actions"><button class="button button-light" data-close>取消</button><button class="button button-danger" data-confirm-delete="${article.id}">确认删除</button></div>`);
+    return;
+  }
+  const publishButton = e.target.closest("[data-publish-article]");
+  if (publishButton) {
+    e.preventDefault();
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    const article = store.articles.find(item => item.id === Number(publishButton.dataset.publishArticle));
+    if (!article) return showToast("文章不存在");
+    if (isPublished(article)) return showToast("文章已经发布");
+    const previousStatus = article.status;
+    const previousUpdatedAt = article.updatedAt;
+    article.status = "published";
+    article.updatedAt = new Date().toISOString();
+    if (!save()) {
+      article.status = previousStatus;
+      article.updatedAt = previousUpdatedAt;
+      return;
+    }
+    render();
+    showToast("草稿发布成功");
     return;
   }
   const action = e.target.closest("[data-action]");
@@ -536,6 +568,25 @@ document.addEventListener("click", e => {
     showToast("留言已删除");
     return;
   }
+  const friendDelete = e.target.closest("[data-friend-delete]");
+  if (friendDelete) {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    const friend = store.friends.find(item => String(item.id) === String(friendDelete.dataset.friendDelete));
+    if (!friend) return showToast("好友信息不存在");
+    modal("删除好友", `<p class="confirm-copy">确定删除好友“${friend.name}”吗？</p><div class="modal-actions"><button class="button button-light" data-close>否，保留好友</button><button class="button button-danger" data-confirm-friend-delete="${friend.id}">是，删除</button></div>`);
+    return;
+  }
+  if (e.target.matches("[data-confirm-friend-delete]")) {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    const index = store.friends.findIndex(friend => String(friend.id) === String(e.target.dataset.confirmFriendDelete));
+    if (index < 0) return showToast("好友信息不存在");
+    store.friends.splice(index, 1);
+    save();
+    closeModal();
+    render();
+    showToast("好友已删除");
+    return;
+  }
   const backupDelete = e.target.closest("[data-backup-delete]");
   const backupManage = e.target.closest("[data-backup-manage]");
   if (backupManage) {
@@ -567,7 +618,7 @@ document.addEventListener("click", e => {
     if (backupIndex < 0) return showToast("好友信息不存在");
     const friend = store.backupFriends[backupIndex];
     if (store.friends.some(item => item.name.toLowerCase() === friend.name.toLowerCase() || (item.url && item.url.toLowerCase() === friend.url.toLowerCase()))) return showToast("该好友已在友链列表中");
-    store.friends.push({ name: friend.name, desc: friend.url, avatar: friend.avatar, url: friend.url });
+    store.friends.push({ id: `friend-${Date.now()}`, name: friend.name, desc: friend.url, avatar: friend.avatar, url: friend.url });
     store.backupFriends.splice(backupIndex, 1);
     save();
     closeModal();
@@ -928,7 +979,7 @@ document.addEventListener("submit", async e => {
     try { blogUrl = new URL(url); } catch { return showToast("信息不正确"); }
     if (!["http:", "https:"].includes(blogUrl.protocol)) return showToast("信息不正确");
     if (store.friends.some(friend => friend.name.toLowerCase() === name.toLowerCase() || (friend.url && friend.url.toLowerCase() === blogUrl.href.toLowerCase()))) return showToast("好友名称或网址已存在");
-    store.friends.push({ name, url: blogUrl.href, avatar, desc });
+    store.friends.push({ id: `friend-${Date.now()}`, name, url: blogUrl.href, avatar, desc });
     save();
     closeModal();
     setPage("friends");

@@ -348,9 +348,10 @@ button { cursor: pointer; }
 .backup-friend { position: relative; }
 .friend-info { min-width: 0; }
 .friend-info a { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-dark); font-size: 11px; }
-.backup-avatar-button { flex: 0 0 auto; border: 0; padding: 0; background: transparent; border-radius: 50%; }
-.backup-avatar-button .friend-avatar { display: block; }
-.backup-avatar-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.backup-avatar-button, .friend-avatar-button { flex: 0 0 auto; border: 0; padding: 0; background: transparent; border-radius: 50%; }
+.backup-avatar-button .friend-avatar, .friend-avatar-button .friend-avatar { display: block; }
+.backup-avatar-button:focus-visible, .friend-avatar-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.friend-avatar-button:hover .friend-avatar { box-shadow: 0 0 0 3px rgba(217, 102, 69, .22); }
 .friend-avatar-upload { width: fit-content; }
 .friend-avatar-preview { width: 64px; height: 64px; margin-top: 8px; border-radius: 50%; overflow: hidden; background: #edf0e9; display: grid; place-items: center; }
 .friend-avatar-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
