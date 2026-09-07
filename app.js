@@ -36,11 +36,86 @@ const toast = document.querySelector("#toast");
 const auth = JSON.parse(sessionStorage.getItem("qichi-auth") || "null") || { mode: "guest" };
 let currentPage = location.hash.slice(1) || "home";
 let activeFilter = "全部";
+let pageTransitionTimer = null;
+let pendingArticleMedia = [];
+let articleMediaReady = null;
+let mediaDatabasePromise = null;
+let coCreateReviewPreview = { requestId: null, mode: "original" };
 
-function save() { localStorage.setItem("qichi-blog", JSON.stringify(store)); }
+function serializeStore() {
+  return JSON.stringify(store, function(key, value) {
+    return key === "src" && this?.storageKey ? undefined : value;
+  });
+}
+function save() {
+  try {
+    localStorage.setItem("qichi-blog", serializeStore());
+    return true;
+  } catch (error) {
+    console.error("博客数据保存失败", error);
+    showToast("保存失败：本地空间不足，请更换更小的文件后重试");
+    return false;
+  }
+}
 function saveAuth() { sessionStorage.setItem("qichi-auth", JSON.stringify(auth)); }
 function isAdmin() { return auth.mode === "admin"; }
 function isPublished(article) { return article.status !== "draft"; }
+function openMediaDatabase() {
+  if (mediaDatabasePromise) return mediaDatabasePromise;
+  mediaDatabasePromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open("qichi-blog-media", 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains("media")) request.result.createObjectStore("media");
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  return mediaDatabasePromise;
+}
+async function storeMediaFile(key, file) {
+  const database = await openMediaDatabase();
+  await new Promise((resolve, reject) => {
+    const request = database.transaction("media", "readwrite").objectStore("media").put(file, key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+async function getStoredMedia(key) {
+  const database = await openMediaDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction("media", "readonly").objectStore("media").get(key);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+function prepareArticleMedia() {
+  if (articleMediaReady) return articleMediaReady;
+  articleMediaReady = (async () => {
+    let migrated = false;
+    for (const article of store.articles) {
+      for (let index = 0; index < (article.media?.length || 0); index += 1) {
+        const media = article.media[index];
+        try {
+          if (media.storageKey) {
+            const file = await getStoredMedia(media.storageKey);
+            if (file) media.src = URL.createObjectURL(file);
+          } else if (media.src?.startsWith("data:")) {
+            const file = await (await fetch(media.src)).blob();
+            const storageKey = `article-media-${article.id}-${index}-${Date.now()}`;
+            await storeMediaFile(storageKey, file);
+            media.storageKey = storageKey;
+            media.src = URL.createObjectURL(file);
+            migrated = true;
+          }
+        } catch (error) {
+          console.error("文章媒体读取失败", error);
+        }
+      }
+    }
+    if (migrated) save();
+  })();
+  return articleMediaReady;
+}
 function avatarMarkup(className = "") {
   return store.profile.avatarImage
     ? `<img class="${className}" src="${store.profile.avatarImage}" alt="个人头像" />`
@@ -50,25 +125,55 @@ function showToast(message) {
   toast.textContent = message; toast.classList.add("show");
   clearTimeout(showToast.timer); showToast.timer = setTimeout(() => toast.classList.remove("show"), 2200);
 }
-function setPage(page) { currentPage = page; location.hash = page; render(); window.scrollTo(0, 0); }
+function setPage(page) {
+  currentPage = page;
+  window.scrollTo(0, 0);
+  if (location.hash === `#${page}`) render({ animate: true });
+  else location.hash = page;
+}
 function tags() { return ["全部", ...new Set(store.articles.flatMap(a => a.tags))]; }
 function navState() {
   document.querySelectorAll("[data-nav]").forEach(link => link.classList.toggle("active", link.dataset.nav === currentPage));
   const status = document.querySelector("[data-auth-status]");
   if (status) status.textContent = isAdmin() ? "管理员" : "访客";
+  const pendingMessages = store.guestbook.filter(message => message.status === "pending").length;
+  const petNotification = document.querySelector("[data-pet-notification]");
+  const petCharacter = document.querySelector("#pet-character");
+  if (petNotification) petNotification.hidden = !isAdmin() || pendingMessages === 0;
+  if (petCharacter) {
+    const label = pendingMessages && isAdmin()
+      ? `打开宠物助手，${pendingMessages}条待处理留言`
+      : "打开宠物助手";
+    petCharacter.setAttribute("aria-label", label);
+    petCharacter.title = label;
+  }
   const adminPetAction = document.querySelector("[data-admin-pet-action]");
   if (adminPetAction) adminPetAction.hidden = !isAdmin();
-  const coCreateEntry = document.querySelector("[data-co-create-entry]");
-  if (coCreateEntry) coCreateEntry.hidden = !isAdmin();
+  const pendingCoCreation = store.coCreationRequests.filter(request => request.status === "pending").length;
+  const coCreateNotification = document.querySelector("[data-co-create-notification]");
+  const coCreateNav = document.querySelector('[data-nav="co-create"]');
+  const hasPendingCoCreation = isAdmin() && pendingCoCreation > 0;
+  if (coCreateNotification) coCreateNotification.hidden = !hasPendingCoCreation;
+  if (coCreateNav) {
+    const label = hasPendingCoCreation
+      ? `共创界面，${pendingCoCreation}条待审核内容`
+      : "共创界面";
+    coCreateNav.setAttribute("aria-label", label);
+    coCreateNav.title = label;
+  }
   const headerAvatar = document.querySelector("[data-header-avatar]");
   if (headerAvatar) {
     headerAvatar.innerHTML = avatarMarkup();
     headerAvatar.parentElement.classList.toggle("has-image", Boolean(store.profile.avatarImage));
   }
 }
+function articleCover(article) {
+  const firstImage = article.media?.find(media => media.type === "image" && media.src);
+  return firstImage?.src || article.cover || "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=900&q=80";
+}
 function articleCard(article) {
   return `<article class="article-card"><a href="#article-${article.id}">
-    <div class="article-cover"><img src="${article.cover}" alt="" /></div>
+    <div class="article-cover"><img src="${articleCover(article)}" alt="${article.title}的文章封面" /></div>
     <div class="article-body"><div class="article-meta"><span>${article.date}</span><span>${article.read} min read</span>${article.status === "draft" ? `<span class="draft-label">草稿</span>` : ""}</div>
     <h3>${article.title}</h3><p>${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div></div></a>${isAdmin() && isPublished(article) ? `<button class="delete-article" data-delete="${article.id}" aria-label="删除文章" title="删除文章">删除</button>` : ""}</article>`;
 }
@@ -87,10 +192,10 @@ function formatAnnouncementTime(value) {
 }
 function renderHome() {
   const latest = store.articles.slice(0, 3);
-  return layout(`<section class="hero"><div class="hero-content"><div class="eyebrow">A QUIET PLACE FOR LOUD THOUGHTS</div><h1>记录生活，<br />也记录正在成为的自己。</h1><p>${store.profile.bio} 这里是我的个人博客，写设计、技术、阅读，以及那些值得被记住的小事。</p><div class="hero-actions"><a class="button button-primary" href="#archive">阅读文章</a><button class="button button-ghost" data-action="guestbook">留下足迹</button><button class="button button-ghost" data-action="recommend">推荐</button></div></div></section>
-    <section class="announcement-home"><div class="announcement-home-inner"><div><span class="eyebrow">ANNOUNCEMENT</span><h2>${store.announcement ? store.announcement.title : "公告栏"}</h2><p>${store.announcement ? store.announcement.body : "暂无公告"}</p></div><a class="text-link" href="#announcement">查看公告 →</a></div></section>
+  return layout(`<section class="hero home-hero"><div class="hero-content"><div class="eyebrow">A QUIET PLACE FOR LOUD THOUGHTS</div><h1>记录生活，<br />也记录正在成为的自己。</h1><p>${store.profile.bio} 这里是我的个人博客，写设计、技术、阅读，以及那些值得被记住的小事。</p><div class="hero-actions"><a class="button button-primary" href="#archive">阅读文章</a><button class="button button-ghost" data-action="guestbook">留下足迹</button><button class="button button-ghost" data-action="recommend">推荐</button></div></div><button class="home-scroll" type="button" data-action="home-next" aria-label="查看首页内容" title="查看首页内容"><span aria-hidden="true">↓</span></button></section>
+    <div class="home-content" id="home-content"><section class="announcement-home"><div class="announcement-home-inner"><div><span class="eyebrow">ANNOUNCEMENT</span><h2>${store.announcement ? store.announcement.title : "公告栏"}</h2><p>${store.announcement ? store.announcement.body : "暂无公告"}</p></div><a class="text-link" href="#announcement">查看公告 →</a></div></section>
     <section class="section"><div class="section-heading"><div><h2>最近写下</h2><p>一些关于生活、设计和持续学习的记录</p></div><a class="text-link" href="#archive">查看全部文章 →</a></div><div class="article-grid">${latest.map(articleCard).join("")}</div></section>
-    <section class="feature-band"><div class="section feature-layout"><div class="feature-note"><div class="eyebrow">NOTES FROM THE DESK</div><h2>愿你在这里，<br />找到一点自己的节奏。</h2><p>博客不是答案集，而是一张持续展开的地图。我把走过的路、遇到的问题和偶尔闪光的念头放在这里，等它们与另一个人相遇。</p><a class="text-link" href="#timeline">沿着时间轴走走 →</a></div><div class="stats"><div class="stat"><strong>${store.articles.length}</strong><span>篇文章</span></div><div class="stat"><strong>${store.articles.reduce((sum, a) => sum + a.likes, 0)}</strong><span>次喜欢</span></div><div class="stat"><strong>${store.guestbook.length}</strong><span>位访客</span></div></div></div></section>`);
+    <section class="feature-band"><div class="section feature-layout"><div class="feature-note"><div class="eyebrow">NOTES FROM THE DESK</div><h2>愿你在这里，<br />找到一点自己的节奏。</h2><p>博客不是答案集，而是一张持续展开的地图。我把走过的路、遇到的问题和偶尔闪光的念头放在这里，等它们与另一个人相遇。</p><a class="text-link" href="#timeline">沿着时间轴走走 →</a></div><div class="stats"><div class="stat"><strong>${store.articles.length}</strong><span>篇文章</span></div><div class="stat"><strong>${store.articles.reduce((sum, a) => sum + a.likes, 0)}</strong><span>次喜欢</span></div><div class="stat"><strong>${store.guestbook.length}</strong><span>位访客</span></div></div></div></section></div>`);
 }
 function renderArchive() {
   const q = new URLSearchParams(location.hash.split("?")[1] || "").get("q") || "";
@@ -101,7 +206,7 @@ function renderArticle(id) {
   const article = store.articles.find(a => a.id === Number(id));
   if (!article) return layout(`<section class="section"><div class="empty">这篇文章不可访问。</div></section>`);
   const comments = store.comments.filter(c => c.articleId === article.id);
-  return layout(`<section class="section"><article class="detail"><div class="detail-topline"><a class="text-link" href="#archive">← 返回文章列表</a>${isAdmin() && isPublished(article) ? `<button class="delete-article" data-delete="${article.id}">删除文章</button>` : ""}</div><div class="article-meta" style="margin-top:34px"><span>${article.date}</span><span>${article.read} min read</span></div><h1>${article.title}</h1><p class="lead">${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div><div class="detail-content">${article.body.map(p => `<p>${p}</p>`).join("")}${articleMediaMarkup(article)}</div><div class="interaction"><button class="${article.liked ? "active" : ""}" data-like="${article.id}">♡ ${article.liked ? "已喜欢" : "喜欢"} · ${article.likes}</button><button data-action="comment" data-id="${article.id}">评论 · ${comments.length}</button></div><h2>评论</h2><div class="comment-list">${comments.length ? comments.map(c => `<div class="comment"><div class="comment-head"><span>${c.name}</span><span>刚刚</span></div><p>${c.text}</p></div>`).join("") : `<div class="empty">还没有评论，来说点什么吧。</div>`}</div></article></section>`);
+  return layout(`<section class="section"><article class="detail"><div class="detail-topline"><a class="text-link" href="#archive">← 返回文章列表</a>${isAdmin() ? `<div class="detail-admin-actions"><button class="button button-light" data-action="edit-article" data-id="${article.id}">编辑文章</button>${isPublished(article) ? `<button class="delete-article" data-delete="${article.id}">删除文章</button>` : ""}</div>` : ""}</div><div class="article-meta" style="margin-top:34px"><span>${article.date}</span><span>${article.read} min read</span>${article.updatedAt && article.updatedAt !== article.date ? `<span>更新于 ${formatAnnouncementTime(article.updatedAt)}</span>` : ""}</div><h1>${article.title}</h1><p class="lead">${article.summary}</p><div class="tag-row">${article.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div><div class="detail-content">${article.body.map(p => `<p>${p}</p>`).join("")}${articleMediaMarkup(article)}</div><div class="interaction"><button class="${article.liked ? "active" : ""}" data-like="${article.id}">♡ ${article.liked ? "已喜欢" : "喜欢"} · ${article.likes}</button><button data-action="comment" data-id="${article.id}">评论 · ${comments.length}</button></div><h2>评论</h2><div class="comment-list">${comments.length ? comments.map(c => `<div class="comment"><div class="comment-head"><span>${c.name}</span><span>刚刚</span></div><p>${c.text}</p></div>`).join("") : `<div class="empty">还没有评论，来说点什么吧。</div>`}</div></article></section>`);
 }
 function renderTimeline() {
   return layout(`<section class="page-top"><h1>时间轴</h1><p>按照时间，回看一路写下的痕迹。</p></section><section class="section"><div class="timeline">${[...store.articles].sort((a,b) => b.date.localeCompare(a.date)).map(a => `<div class="timeline-item"><div class="timeline-date">${a.date.slice(0,7)}</div><a class="timeline-card" href="#article-${a.id}"><h3>${a.title}</h3><p>${a.summary}</p></a></div>`).join("")}</div></section>`);
@@ -119,6 +224,18 @@ function renderAnnouncement() {
 function diffMarkup(original, proposed) {
   return `<div class="diff-block"><div class="diff-original"><strong>原文</strong><p>${original}</p></div><div class="diff-proposed"><strong>修改稿</strong><p>${proposed}</p></div></div>`;
 }
+function requestChanges(request) {
+  return Array.isArray(request.changes) && request.changes.length
+    ? request.changes
+    : [{ paragraphIndex: request.paragraphIndex, originalText: request.originalText, proposedText: request.proposedText }];
+}
+function storedRequestChanges(request) {
+  if (!Array.isArray(request.changes) || !request.changes.length) request.changes = requestChanges(request);
+  return request.changes;
+}
+function pendingRequestChanges(request) {
+  return requestChanges(request).filter(change => !change.reviewStatus || change.reviewStatus === "pending");
+}
 function coCreateMediaMarkup(item) {
   if (!item.media?.length) return "";
   return `<div class="article-media">${item.media.map(media => media.type === "video" ? `<video controls preload="metadata" src="${media.src}"></video>` : `<img src="${media.src}" alt="${media.name || "共创配图"}" />`).join("")}</div>`;
@@ -135,31 +252,68 @@ function renderCoCreateHome() {
 function renderCoCreateReview() {
   if (!isAdmin()) return layout(`<section class="section"><div class="empty">请先登录管理员账户。</div></section>`);
   const pending = store.coCreationRequests.filter(request => request.status === "pending");
-  return layout(`<section class="page-top"><h1>共创申请审核</h1><p>审核游客对共创界面内容的修改申请。</p></section><section class="section"><div class="comment-list">${pending.length ? pending.map(request => { const item = store.coCreateArticles.find(article => article.id === request.coCreateId); return `<article class="co-request"><div class="comment-head"><span>${request.applicant} · ${item ? item.title : "内容已不存在"}</span><span>${formatAnnouncementTime(request.createdAt)}</span></div>${item ? diffMarkup(request.originalText, request.proposedText) : `<p class="confirm-copy">共创内容已不存在。</p>`}<div class="helper-actions"><button class="button button-danger" data-co-reject="${request.id}">拒绝</button><button class="button button-primary" data-co-approve="${request.id}">通过并合并</button></div></article>`; }).join("") : `<div class="empty">暂无待审核的共创申请。</div>`}</div></section>`);
+  return layout(`<section class="page-top"><h1>共创申请审核</h1><p>勾选需要通过的段落，可分批审核同一份共创申请。</p></section><section class="section"><div class="comment-list">${pending.length ? pending.map(request => { const item = store.coCreateArticles.find(article => article.id === request.coCreateId); const changes = requestChanges(request); const pendingCount = pendingRequestChanges(request).length; return `<article class="co-request"><div class="comment-head"><span>${request.applicant} · ${item ? item.title : "内容已不存在"}</span><span>${formatAnnouncementTime(request.createdAt)}</span></div>${item ? `<p class="request-review-summary">剩余 ${pendingCount} 段待审核</p><div class="request-change-list">${changes.map((change, index) => { const isPending = !change.reviewStatus || change.reviewStatus === "pending"; const statusText = change.reviewStatus === "approved" ? "已通过" : change.reviewStatus === "rejected" ? "已拒绝" : change.reviewStatus === "conflict" ? "内容冲突" : "待审核"; return `<div class="request-change ${isPending ? "" : "is-reviewed"}"><div class="request-change-head"><span class="request-change-label">第 ${change.paragraphIndex + 1} 段${changes.length > 1 ? ` · 修改 ${index + 1}` : ""}</span>${isPending ? `<label class="request-change-select"><input type="checkbox" data-co-change-select="${request.id}" data-co-change-index="${index}" /><span>通过此段</span></label>` : `<span class="request-change-status">${statusText}</span>`}</div><div class="diff-block"><a class="diff-original diff-original-link" href="#co-create-review-${request.id}" data-co-preview-open="${request.id}" title="查看原文详情"><strong>原文</strong><p>${change.originalText}</p></a><div class="diff-proposed"><strong>修改稿</strong><p>${change.proposedText}</p></div></div></div>`; }).join("")}</div>` : `<p class="confirm-copy">共创内容已不存在。</p>`}<div class="helper-actions"><button class="button button-danger" data-co-reject="${request.id}">拒绝全部剩余段落</button><button class="button button-primary" data-co-approve-selected="${request.id}">通过所选段落</button></div></article>`; }).join("") : `<div class="empty">暂无待审核的共创申请。</div>`}</div></section>`);
+}
+function renderCoCreateReviewPreview(id) {
+  if (!isAdmin()) return layout(`<section class="section"><div class="empty">请先登录管理员账户。</div></section>`);
+  const request = store.coCreationRequests.find(item => String(item.id) === String(id));
+  const article = request && store.coCreateArticles.find(item => item.id === request.coCreateId);
+  if (!request || request.status !== "pending" || !article) {
+    return layout(`<section class="section"><div class="empty">该共创申请或原文已不存在。</div></section>`);
+  }
+  const isComparing = coCreateReviewPreview.requestId === request.id && coCreateReviewPreview.mode === "proposed";
+  const changes = requestChanges(request);
+  const previewBody = [...article.body];
+  changes.forEach(change => {
+    previewBody[change.paragraphIndex] = isComparing ? change.proposedText : change.originalText;
+  });
+  const previewLabel = isComparing ? "修改稿对比" : "原文";
+  const actionLabel = isComparing ? "还原" : "对比";
+  const nextMode = isComparing ? "original" : "proposed";
+  return layout(`<section class="section"><article class="detail review-preview-detail"><div class="detail-topline"><a class="text-link" href="#co-create-review">← 返回共创申请审核</a><button class="button ${isComparing ? "button-light" : "button-primary"}" data-co-preview-mode="${nextMode}" data-co-preview-request="${request.id}">${actionLabel}</button></div><div class="article-meta review-preview-meta"><span>申请人：${request.applicant}</span><span>申请时间：${formatAnnouncementTime(request.createdAt)}</span><span class="tag">查看：${previewLabel}</span></div><h1>${article.title}</h1><p class="lead">${isComparing ? "当前已将申请中的修改稿替换到对应段落，用于审核对比。" : "当前展示申请提交时的原文内容。"}</p><div class="detail-content">${previewBody.map(paragraph => `<p>${paragraph}</p>`).join("")}${coCreateMediaMarkup(article)}</div></article></section>`);
 }
 function renderGuestbook() {
   const messages = store.guestbook.filter(message => message.status === "approved");
-  return layout(`<section class="page-top"><h1>留言</h1><p>如果你愿意，可以在这里留下一句话。</p></section><section class="section"><button class="button button-primary" data-action="guestbook-form">到此一游</button><div class="comment-list" style="margin-top:28px">${messages.length ? messages.map(g => `<div class="comment"><div class="comment-head"><span>${g.name}</span><span>${g.date}</span></div><p>${g.text}</p></div>`).join("") : `<div class="empty">还没有公开留言，来说点什么吧。</div>`}</div></section>`);
+  return layout(`<section class="page-top"><h1>留言</h1><p>如果你愿意，可以在这里留下一句话。</p></section><section class="section"><button class="button button-primary" data-action="guestbook-form">我也要留言</button><div class="comment-list" style="margin-top:28px">${messages.length ? messages.map(g => `<div class="comment"><div class="comment-head"><span>${g.name}</span><span>${g.date}</span></div><p>${g.text}</p></div>`).join("") : `<div class="empty">还没有公开留言，来说点什么吧。</div>`}</div></section>`);
 }
 function renderPetHelper() {
   if (!isAdmin()) return layout(`<section class="section"><div class="empty">请先登录管理员账户。</div></section>`);
   const pending = store.guestbook.filter(message => message.status === "pending").length;
   return layout(`<section class="page-top"><div class="page-top-inner"><div><h1>宠物助手</h1><p>管理访客留言，让值得留下的话被看见。</p></div><span class="pending-count">${pending} 条待处理</span></div></section><section class="section"><div class="helper-toolbar"><span class="helper-summary">共 ${store.guestbook.length} 条留言</span><button class="button button-light" data-action="guestbook">查看公开留言</button></div><div class="comment-list">${store.guestbook.length ? store.guestbook.map(message => `<div class="comment helper-message"><div class="comment-head"><span>${message.name}</span><span>${message.date} · ${message.status === "pending" ? "待审核" : "已通过"}</span></div><p>${message.text}</p><div class="helper-actions">${message.status === "pending" ? `<button class="button button-primary" data-pet-save="${message.id}">通过留言</button>` : ""}<button class="button button-danger" data-pet-delete="${message.id}">删除</button></div></div>`).join("") : `<div class="empty">暂时没有留言。</div>`}</div></section>`);
 }
-function render() {
-  if (currentPage.startsWith("article-")) app.innerHTML = renderArticle(currentPage.split("-")[1]);
-  else if (currentPage === "archive") app.innerHTML = renderArchive();
-  else if (currentPage === "timeline") app.innerHTML = renderTimeline();
-  else if (currentPage === "friends") app.innerHTML = renderFriends();
-  else if (currentPage === "friend-backup") app.innerHTML = renderFriendBackup();
-  else if (currentPage === "announcement") app.innerHTML = renderAnnouncement();
-  else if (currentPage === "co-create") app.innerHTML = renderCoCreateHome();
-  else if (currentPage === "co-create-review") app.innerHTML = renderCoCreateReview();
-  else if (currentPage.startsWith("co-create-")) app.innerHTML = renderCoCreate(currentPage.split("-")[2]);
-  else if (currentPage === "guestbook") app.innerHTML = renderGuestbook();
-  else if (currentPage === "pet-helper") app.innerHTML = renderPetHelper();
-  else app.innerHTML = renderHome();
-  navState();
+function render({ animate = false } = {}) {
+  const update = () => {
+    if (currentPage.startsWith("article-")) app.innerHTML = renderArticle(currentPage.split("-")[1]);
+    else if (currentPage === "archive") app.innerHTML = renderArchive();
+    else if (currentPage === "timeline") app.innerHTML = renderTimeline();
+    else if (currentPage === "friends") app.innerHTML = renderFriends();
+    else if (currentPage === "friend-backup") app.innerHTML = renderFriendBackup();
+    else if (currentPage === "announcement") app.innerHTML = renderAnnouncement();
+    else if (currentPage === "co-create") app.innerHTML = renderCoCreateHome();
+    else if (currentPage === "co-create-review") app.innerHTML = renderCoCreateReview();
+    else if (currentPage.startsWith("co-create-review-")) app.innerHTML = renderCoCreateReviewPreview(currentPage.slice("co-create-review-".length));
+    else if (currentPage.startsWith("co-create-")) app.innerHTML = renderCoCreate(currentPage.split("-")[2]);
+    else if (currentPage === "guestbook") app.innerHTML = renderGuestbook();
+    else if (currentPage === "pet-helper") app.innerHTML = renderPetHelper();
+    else app.innerHTML = renderHome();
+    navState();
+  };
+
+  clearTimeout(pageTransitionTimer);
+  if (!animate || !app.innerHTML.trim()) {
+    update();
+    return;
+  }
+
+  app.classList.remove("page-transition-enter", "page-transition-exit");
+  app.classList.add("page-transition-exit");
+  pageTransitionTimer = setTimeout(() => {
+    update();
+    app.classList.remove("page-transition-exit");
+    void app.offsetWidth;
+    app.classList.add("page-transition-enter");
+    pageTransitionTimer = setTimeout(() => app.classList.remove("page-transition-enter"), 420);
+  }, 180);
 }
 function modal(title, body) {
   document.querySelector("#modal-root").innerHTML = `<div class="modal-backdrop" data-close><div class="modal" role="dialog" aria-modal="true"><h2>${title}</h2>${body}</div></div>`;
@@ -263,6 +417,15 @@ http://localhost:4173/`;
     modal("推荐博客", `<p class="confirm-copy">把这份安静的记录分享给朋友。</p><textarea class="form-textarea recommendation-text" id="recommendation-text" readonly>${recommendation}</textarea><p class="form-help recommendation-help">点击复制失败时，请手动选择上方文字并复制。</p><div class="modal-actions"><button class="button button-light" data-close>关闭</button><button class="button button-primary" data-action="copy-recommendation">复制推荐内容</button></div>`);
   }
   if (name === "copy-recommendation") copyRecommendation();
+  if (name === "home-next") {
+    const content = document.querySelector("#home-content");
+    const headerHeight = document.querySelector(".site-header")?.offsetHeight || 0;
+    if (content) window.scrollTo({
+      top: content.getBoundingClientRect().top + window.scrollY - headerHeight,
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"
+    });
+    return;
+  }
   if (name === "reward") {
     if (isAdmin()) {
       modal("微信打赏", `<form id="reward-form" class="form-stack"><p class="confirm-copy">上传微信赞赏码后，游客可以在此处查看。</p><label class="form-label">赞赏码图片<button type="button" class="button button-light upload-button">选择图片<input id="reward-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><span class="form-help">支持 PNG、JPG、WEBP，大小不超过 2MB。</span><div id="reward-preview" class="reward-preview">${store.reward.image ? `<img src="${store.reward.image}" alt="当前微信赞赏码" />` : `<span>尚未上传</span>`}</div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存赞赏码</button></div></form>`);
@@ -283,7 +446,20 @@ http://localhost:4173/`;
   if (name === "logout") { auth.mode = "guest"; saveAuth(); closeModal(); navState(); showToast("已退出登录"); }
   if (name === "publish") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
+    pendingArticleMedia = [];
     modal("发布文章", `<form id="publish-form" class="form-stack"><label class="form-label">文章标题<input class="form-input" name="title" maxlength="80" required placeholder="输入文章标题" /></label><label class="form-label">文章摘要<textarea class="form-textarea compact-textarea" name="summary" maxlength="180" required placeholder="用一句话介绍这篇文章"></textarea></label><label class="form-label">文章正文<textarea class="form-textarea publish-content" name="body" maxlength="10000" required placeholder="写下你的文章内容"></textarea></label><label class="form-label">标签<input class="form-input" name="tags" maxlength="100" required placeholder="用逗号分隔，例如：生活，随笔" /></label><label class="form-label">图片或视频<button type="button" class="button button-light upload-button media-upload-button">选择文件<input id="article-media" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" multiple /></button><span class="form-help">支持 PNG、JPG、WEBP、MP4、WEBM；图片不超过 5MB，视频不超过 30MB。</span><div id="media-preview" class="media-preview"></div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button type="submit" name="status" value="draft" class="button button-light">保存草稿</button><button type="submit" name="status" value="published" class="button button-primary">正式发布</button></div></form>`);
+  }
+  if (name === "edit-article") {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    const article = store.articles.find(item => item.id === Number(action.dataset.id));
+    if (!article) return showToast("文章不存在");
+    pendingArticleMedia = [];
+    const existingMedia = article.media?.length
+      ? article.media.map(media => media.type === "video"
+        ? `<video controls src="${media.src}"></video>`
+        : `<img src="${media.src}" alt="${media.name || "现有文章媒体"}" />`).join("")
+      : `<span class="media-empty">暂无已上传媒体</span>`;
+    modal("编辑文章", `<form id="edit-article-form" class="form-stack"><input type="hidden" name="articleId" value="${article.id}" /><label class="form-label">文章标题<input class="form-input" name="title" maxlength="80" required value="${article.title}" /></label><label class="form-label">文章摘要<textarea class="form-textarea compact-textarea" name="summary" maxlength="180" required>${article.summary}</textarea></label><label class="form-label">文章正文<textarea class="form-textarea publish-content" name="body" maxlength="10000" required>${article.body.join("\n")}</textarea></label><label class="form-label">标签<input class="form-input" name="tags" maxlength="100" required value="${article.tags.join("，")}" /></label><label class="form-label">已有图片或视频<div class="media-preview existing-media-preview">${existingMedia}</div></label><label class="form-label">新增图片或视频<button type="button" class="button button-light upload-button media-upload-button">选择文件<input id="article-media" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" multiple /></button><span class="form-help">新增文件会保留原有媒体。支持 PNG、JPG、WEBP、MP4、WEBM；图片不超过 5MB，视频不超过 30MB。</span><div id="media-preview" class="media-preview"></div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存修改</button></div></form>`);
   }
   if (name === "guestbook") setPage("guestbook");
   if (name === "friend-backup") setPage("friend-backup");
@@ -306,7 +482,7 @@ http://localhost:4173/`;
   if (name === "co-create-apply") {
     const item = store.coCreateArticles.find(article => article.id === Number(action.dataset.id));
     if (!item) return showToast("共创内容不存在");
-    modal("申请修改", `<form id="co-create-form" class="form-stack"><input type="hidden" name="coCreateId" value="${item.id}" /><label class="form-label">申请人<input class="form-input" name="applicant" maxlength="30" required placeholder="你的昵称" /></label><fieldset class="paragraph-picker"><legend>选择目标段落</legend>${item.body.map((paragraph, index) => `<label class="paragraph-option"><input type="radio" name="paragraphIndex" value="${index}" /><span>${paragraph}</span></label>`).join("")}</fieldset><label class="form-label">修改稿<textarea class="form-textarea co-create-editor" name="proposedText" maxlength="1000" required placeholder="请输入完整的修改内容"></textarea></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">申请合并</button></div></form>`);
+    modal("申请修改", `<form id="co-create-form" class="form-stack"><input type="hidden" name="coCreateId" value="${item.id}" /><label class="form-label">申请人<input class="form-input" name="applicant" maxlength="30" required placeholder="你的昵称" /></label><fieldset class="paragraph-picker"><legend>选择目标段落（可多选）</legend>${item.body.map((paragraph, index) => `<label class="paragraph-option"><input type="checkbox" name="paragraphIndex" value="${index}" /><span>${paragraph}</span></label>`).join("")}</fieldset><div class="co-create-editors" id="co-create-editors"></div><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">申请合并</button></div></form>`);
   }
   if (name === "co-create-publish") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
@@ -399,33 +575,59 @@ document.addEventListener("click", e => {
     showToast("已移入友链列表");
     return;
   }
-  const approveRequest = e.target.closest("[data-co-approve]");
+  const previewLink = e.target.closest("[data-co-preview-open]");
+  if (previewLink) {
+    coCreateReviewPreview = { requestId: Number(previewLink.dataset.coPreviewOpen), mode: "original" };
+    return;
+  }
+  const previewModeButton = e.target.closest("[data-co-preview-mode]");
+  if (previewModeButton) {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    coCreateReviewPreview = {
+      requestId: Number(previewModeButton.dataset.coPreviewRequest),
+      mode: previewModeButton.dataset.coPreviewMode
+    };
+    render();
+    return;
+  }
+  const approveRequest = e.target.closest("[data-co-approve-selected]");
   if (approveRequest) {
     if (!isAdmin()) return showToast("请先登录管理员账户");
-    const request = store.coCreationRequests.find(item => String(item.id) === String(approveRequest.dataset.coApprove));
+    const request = store.coCreationRequests.find(item => String(item.id) === String(approveRequest.dataset.coApproveSelected));
     const article = request && store.coCreateArticles.find(item => item.id === request.coCreateId);
     if (!request || request.status !== "pending") return showToast("申请已处理");
     if (!article) return showToast("原文章已不存在");
-    if (article.body[request.paragraphIndex] !== request.originalText) {
-      request.status = "conflict";
-      request.reviewedAt = new Date().toISOString();
-      request.reviewedBy = "管理员";
-      request.reviewResult = "共创内容已发生变化，无法合并";
-      store.auditLogs.push({ action: "co-create-conflict", requestId: request.id, at: request.reviewedAt, operator: "管理员" });
-      save();
-      render();
-      return showToast("共创内容已发生变化，无法合并");
+    const selectedIndexes = [...document.querySelectorAll(`[data-co-change-select="${request.id}"]:checked`)]
+      .map(input => Number(input.dataset.coChangeIndex))
+      .filter(Number.isInteger);
+    if (!selectedIndexes.length) return showToast("请至少选择一个段落");
+    const changes = storedRequestChanges(request);
+    const selectedChanges = selectedIndexes
+      .map(index => ({ change: changes[index], index }))
+      .filter(({ change }) => change && (!change.reviewStatus || change.reviewStatus === "pending"));
+    if (!selectedChanges.length) return showToast("所选段落已处理");
+    if (selectedChanges.some(({ change }) => article.body[change.paragraphIndex] !== change.originalText)) {
+      return showToast("所选段落的原文已发生变化，无法合并");
     }
-    if (request.originalText === request.proposedText) return showToast("文章未被修改");
-    article.body[request.paragraphIndex] = request.proposedText;
-    request.status = "approved";
-    request.reviewedAt = new Date().toISOString();
+    if (selectedChanges.every(({ change }) => change.originalText === change.proposedText)) return showToast("文章未被修改");
+    const reviewedAt = new Date().toISOString();
+    selectedChanges.forEach(({ change }) => {
+      article.body[change.paragraphIndex] = change.proposedText;
+      change.reviewStatus = "approved";
+      change.reviewedAt = reviewedAt;
+      change.reviewedBy = "管理员";
+    });
+    const remaining = pendingRequestChanges(request).length;
+    request.status = remaining ? "pending" : "approved";
+    request.reviewedAt = reviewedAt;
     request.reviewedBy = "管理员";
-    request.reviewResult = "已通过并合并";
-    store.auditLogs.push({ action: "co-create-approved", requestId: request.id, coCreateId: article.id, at: request.reviewedAt, operator: "管理员" });
+    request.reviewResult = remaining
+      ? `已合并 ${selectedChanges.length} 段，剩余 ${remaining} 段待审核`
+      : "所有段落均已通过并合并";
+    store.auditLogs.push({ action: "co-create-approved", requestId: request.id, coCreateId: article.id, paragraphIndexes: selectedChanges.map(({ change }) => change.paragraphIndex), at: reviewedAt, operator: "管理员" });
     save();
     render();
-    showToast("共创申请已通过并合并");
+    showToast(remaining ? `已通过 ${selectedChanges.length} 段，剩余内容待审核` : "共创申请已全部通过并合并");
     return;
   }
   const rejectRequest = e.target.closest("[data-co-reject]");
@@ -433,10 +635,19 @@ document.addEventListener("click", e => {
     if (!isAdmin()) return showToast("请先登录管理员账户");
     const request = store.coCreationRequests.find(item => String(item.id) === String(rejectRequest.dataset.coReject));
     if (!request || request.status !== "pending") return showToast("申请已处理");
+    const changes = storedRequestChanges(request);
+    const reviewedAt = new Date().toISOString();
+    changes.forEach(change => {
+      if (!change.reviewStatus || change.reviewStatus === "pending") {
+        change.reviewStatus = "rejected";
+        change.reviewedAt = reviewedAt;
+        change.reviewedBy = "管理员";
+      }
+    });
     request.status = "rejected";
-    request.reviewedAt = new Date().toISOString();
+    request.reviewedAt = reviewedAt;
     request.reviewedBy = "管理员";
-    request.reviewResult = "管理员拒绝申请";
+    request.reviewResult = "管理员拒绝全部剩余段落";
     store.auditLogs.push({ action: "co-create-rejected", requestId: request.id, at: request.reviewedAt, operator: "管理员" });
     save();
     render();
@@ -538,7 +749,7 @@ document.addEventListener("change", e => {
   };
   reader.readAsDataURL(file);
 });
-document.addEventListener("change", e => {
+document.addEventListener("change", async e => {
   if (e.target.id !== "article-media") return;
   const files = [...e.target.files];
   const allowed = ["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"];
@@ -546,21 +757,31 @@ document.addEventListener("change", e => {
     e.target.value = "";
     return showToast("文件格式不支持或文件过大");
   }
-  const pending = [];
-  files.forEach(file => {
+  pendingArticleMedia = await Promise.all(files.map(file => new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      pending.push({ name: file.name, type: file.type.startsWith("video/") ? "video" : "image", src: reader.result });
-      e.target.dataset.pendingMedia = JSON.stringify(pending);
-      const preview = document.querySelector("#media-preview");
-      if (preview) preview.innerHTML = pending.map(media => media.type === "video"
-        ? `<video controls src="${media.src}"></video>`
-        : `<img src="${media.src}" alt="${media.name}" />`).join("");
-    };
+    reader.onload = () => resolve({ name: file.name, type: file.type.startsWith("video/") ? "video" : "image", file, src: reader.result });
+    reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
-  });
+  })));
+  const preview = document.querySelector("#media-preview");
+  if (preview) preview.innerHTML = pendingArticleMedia.map(media => media.type === "video"
+    ? `<video controls src="${media.src}"></video>`
+    : `<img src="${media.src}" alt="${media.name}" />`).join("");
 });
-document.addEventListener("submit", e => {
+document.addEventListener("change", e => {
+  if (!e.target.matches('#co-create-form input[name="paragraphIndex"]')) return;
+  const form = e.target.closest("#co-create-form");
+  const editors = form?.querySelector("#co-create-editors");
+  if (!form || !editors) return;
+  const previousValues = new Map([...editors.querySelectorAll("[data-paragraph-editor]")].map(editor => [editor.dataset.paragraphEditor, editor.value]));
+  const selected = [...form.querySelectorAll('input[name="paragraphIndex"]:checked')];
+  editors.innerHTML = selected.map(input => {
+    const paragraph = input.closest(".paragraph-option")?.querySelector("span")?.textContent.trim() || "";
+    const value = previousValues.get(input.value) || "";
+    return `<label class="form-label co-create-editor-block"><span>第 ${Number(input.value) + 1} 段修改稿</span><span class="form-help">${paragraph}</span><textarea class="form-textarea co-create-editor" data-paragraph-editor="${input.value}" maxlength="1000" required placeholder="请输入这一段的完整修改内容">${value}</textarea></label>`;
+  }).join("");
+});
+document.addEventListener("submit", async e => {
   e.preventDefault();
   if (e.target.id === "login-form") {
     const password = new FormData(e.target).get("password");
@@ -605,12 +826,76 @@ document.addEventListener("submit", e => {
     const parsedTags = data.get("tags").split(/[,，]/).map(tag => tag.trim()).filter(Boolean);
     if (!title || !summary || !body || !parsedTags.length) return showToast("文章内容不完整");
     const now = new Date().toISOString().slice(0, 10);
-    const mediaInput = e.target.querySelector("#article-media");
-    store.articles.unshift({ id: Date.now(), title, date: now, updatedAt: now, status: e.submitter?.value || "published", read: Math.max(1, Math.ceil(body.length / 350)), likes: 0, liked: false, tags: [...new Set(parsedTags)], summary, body: body.split(/\r?\n/).map(paragraph => paragraph.trim()).filter(Boolean), media: mediaInput?.dataset.pendingMedia ? JSON.parse(mediaInput.dataset.pendingMedia) : [], cover: "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=900&q=80" });
-    save();
+    const id = Date.now();
+    const status = e.submitter?.value || "published";
+    try {
+      await prepareArticleMedia();
+      const media = await Promise.all(pendingArticleMedia.map(async (item, index) => {
+        const storageKey = `article-media-${id}-${index}`;
+        await storeMediaFile(storageKey, item.file);
+        return { name: item.name, type: item.type, storageKey, src: URL.createObjectURL(item.file) };
+      }));
+      store.articles.unshift({ id, title, date: now, updatedAt: now, status, read: Math.max(1, Math.ceil(body.length / 350)), likes: 0, liked: false, tags: [...new Set(parsedTags)], summary, body: body.split(/\r?\n/).map(paragraph => paragraph.trim()).filter(Boolean), media, cover: "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=900&q=80" });
+    } catch (error) {
+      console.error("文章媒体保存失败", error);
+      return showToast("媒体文件保存失败，请重试");
+    }
+    if (!save()) {
+      store.articles.shift();
+      return;
+    }
     closeModal();
     setPage("archive");
-    showToast(e.submitter?.value === "draft" ? "草稿保存成功" : "文章发布成功");
+    showToast(status === "draft" ? "草稿保存成功" : "文章发布成功");
+  }
+  if (e.target.id === "edit-article-form") {
+    if (!isAdmin()) return showToast("登录状态已失效，请重新登录");
+    const data = new FormData(e.target);
+    const article = store.articles.find(item => item.id === Number(data.get("articleId")));
+    if (!article) return showToast("文章不存在");
+    const title = data.get("title").trim();
+    const summary = data.get("summary").trim();
+    const body = data.get("body").trim();
+    const parsedTags = data.get("tags").split(/[,，]/).map(tag => tag.trim()).filter(Boolean);
+    if (!title || !summary || !body || !parsedTags.length) return showToast("文章内容不完整");
+    const updatedAt = new Date().toISOString();
+    const originalArticle = {
+      title: article.title,
+      summary: article.summary,
+      body: article.body,
+      tags: article.tags,
+      media: article.media,
+      read: article.read,
+      updatedAt: article.updatedAt
+    };
+    try {
+      await prepareArticleMedia();
+      const addedMedia = await Promise.all(pendingArticleMedia.map(async (item, index) => {
+        const storageKey = `article-media-${article.id}-${Date.now()}-${index}`;
+        await storeMediaFile(storageKey, item.file);
+        return { name: item.name, type: item.type, storageKey, src: URL.createObjectURL(item.file) };
+      }));
+      article.title = title;
+      article.summary = summary;
+      article.body = body.split(/\r?\n/).map(paragraph => paragraph.trim()).filter(Boolean);
+      article.tags = [...new Set(parsedTags)];
+      article.media = [...(article.media || []), ...addedMedia];
+      article.read = Math.max(1, Math.ceil(body.length / 350));
+      article.updatedAt = updatedAt;
+      store.auditLogs.push({ action: "article-updated", articleId: article.id, at: updatedAt, operator: "管理员" });
+    } catch (error) {
+      console.error("文章媒体保存失败", error);
+      return showToast("媒体文件保存失败，请重试");
+    }
+    if (!save()) {
+      Object.assign(article, originalArticle);
+      store.auditLogs.pop();
+      return;
+    }
+    pendingArticleMedia = [];
+    closeModal();
+    setPage(`article-${article.id}`);
+    showToast("文章修改成功");
   }
   if (e.target.id === "guestbook-form") { const data = new FormData(e.target); if (!data.get("text").trim()) return showToast("留言内容不合法"); store.guestbook.unshift({ id: Date.now(), name: data.get("name").trim(), text: data.get("text").trim(), date: new Date().toISOString().slice(0,10), status: "pending" }); save(); closeModal(); render(); showToast("留言已提交，等待审核"); }
   if (e.target.id === "friend-sign-form") {
@@ -669,23 +954,24 @@ document.addEventListener("submit", e => {
   if (e.target.id === "co-create-form") {
     const data = new FormData(e.target);
     const coCreateId = Number(data.get("coCreateId"));
-    const paragraphIndex = Number(data.get("paragraphIndex"));
     const applicant = data.get("applicant").trim();
-    const proposedText = data.get("proposedText").trim();
     const article = store.coCreateArticles.find(item => item.id === coCreateId);
     if (!article) return showToast("共创内容不存在");
-    if (!applicant || !Number.isInteger(paragraphIndex) || !article.body[paragraphIndex] || !proposedText) return showToast("修改内容不完整");
-    if (store.coCreationRequests.some(request => request.coCreateId === coCreateId && request.paragraphIndex === paragraphIndex && request.applicant.toLowerCase() === applicant.toLowerCase() && request.status === "pending")) return showToast("你已有相同段落的待审核申请");
-    const originalText = article.body[paragraphIndex];
-    if (originalText === proposedText) return showToast("文章未被修改");
+    const selected = [...e.target.querySelectorAll('input[name="paragraphIndex"]:checked')];
+    const changes = selected.map(input => {
+      const paragraphIndex = Number(input.value);
+      const proposedText = e.target.querySelector(`[data-paragraph-editor="${paragraphIndex}"]`)?.value.trim();
+      return { paragraphIndex, originalText: article.body[paragraphIndex], proposedText };
+    });
+    if (!applicant || !changes.length || changes.some(change => !Number.isInteger(change.paragraphIndex) || !change.originalText || !change.proposedText)) return showToast("修改内容不完整");
+    if (changes.every(change => change.originalText === change.proposedText)) return showToast("文章未被修改");
+    if (changes.some(change => change.originalText === change.proposedText)) return showToast("每个选中段落都需要有效修改");
+    if (store.coCreationRequests.some(request => request.coCreateId === coCreateId && request.applicant.toLowerCase() === applicant.toLowerCase() && request.status === "pending" && requestChanges(request).some(existing => changes.some(change => change.paragraphIndex === existing.paragraphIndex)))) return showToast("你已有所选段落的待审核申请");
     const createdAt = new Date().toISOString();
     store.coCreationRequests.unshift({
       id: Date.now(),
       coCreateId,
-      paragraphIndex,
-      originalText,
-      proposedText,
-      diff: { removed: originalText, added: proposedText },
+      changes,
       applicant,
       createdAt,
       status: "pending",
@@ -693,7 +979,7 @@ document.addEventListener("submit", e => {
       reviewedBy: null,
       reviewResult: null
     });
-    store.auditLogs.push({ action: "co-create-submitted", coCreateId: coCreateId, at: createdAt, operator: applicant });
+    store.auditLogs.push({ action: "co-create-submitted", coCreateId, changes: changes.length, at: createdAt, operator: applicant });
     save();
     closeModal();
     setPage(`co-create-${coCreateId}`);
@@ -724,5 +1010,5 @@ document.addEventListener("submit", e => {
 });
 document.addEventListener("input", e => { if (e.target.id === "article-search") { const q = e.target.value.trim(); history.replaceState({}, "", q ? `#archive?q=${encodeURIComponent(q)}` : "#archive"); render(); } });
 document.addEventListener("click", e => { if (e.target.id === "guestbook-form") return; });
-window.addEventListener("hashchange", () => { const hash = location.hash.slice(1) || "home"; currentPage = hash.split("?")[0]; render(); });
-document.addEventListener("DOMContentLoaded", () => { render(); initDesktopPet(); });
+window.addEventListener("hashchange", () => { const hash = location.hash.slice(1) || "home"; currentPage = hash.split("?")[0]; render({ animate: true }); window.scrollTo(0, 0); });
+document.addEventListener("DOMContentLoaded", async () => { await prepareArticleMedia(); render(); initDesktopPet(); });

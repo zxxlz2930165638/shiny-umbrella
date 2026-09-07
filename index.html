@@ -23,7 +23,7 @@
         <a href="#friends" data-nav="friends">友链</a>
         <a href="#guestbook" data-nav="guestbook">留言</a>
         <a href="#announcement" data-nav="announcement">公告栏</a>
-        <a href="#co-create" data-nav="co-create">共创界面</a>
+        <a class="nav-co-create" href="#co-create" data-nav="co-create">共创界面<span class="nav-notification" data-co-create-notification aria-hidden="true" hidden></span></a>
         <button class="nav-button" data-action="reward">微信打赏</button>
       </nav>
       <div class="header-actions">
@@ -50,6 +50,7 @@
       </div>
       <button class="pet-character" id="pet-character" type="button" aria-label="打开宠物助手" title="点击和宠物助手互动">
         <img src="./assets/pet-helper.jpg" alt="纸飞机上的宠物助手" draggable="false" />
+        <span class="pet-notification" data-pet-notification aria-hidden="true" hidden></span>
       </button>
       <span class="pet-status">陪你写博客</span>
     </aside>
