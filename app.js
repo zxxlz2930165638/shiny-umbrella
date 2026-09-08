@@ -26,6 +26,10 @@ store.guestbook = (store.guestbook || []).map((message, index) => ({
   status: message.status || "approved"
 }));
 store.backupFriends = store.backupFriends || [];
+store.backupFriends = store.backupFriends.map((friend, index) => ({
+  ...friend,
+  id: friend.id || `backup-${index + 1}`
+}));
 store.friends = (store.friends || []).map((friend, index) => ({
   ...friend,
   id: friend.id || `friend-${index + 1}`
@@ -42,13 +46,24 @@ let currentPage = location.hash.slice(1) || "home";
 let activeFilter = "全部";
 let pageTransitionTimer = null;
 let pendingArticleMedia = [];
+let pendingCoCreateMedia = [];
+let pendingProfileAvatarFile = null;
+let pendingProfileRewardFile = null;
+let pendingRewardFile = null;
+let pendingFriendAvatarFile = null;
+let pendingFriendAddAvatarFile = null;
 let articleMediaReady = null;
 let mediaDatabasePromise = null;
 let coCreateReviewPreview = { requestId: null, mode: "original" };
+let mediaMigrationNeeded = false;
 
 function serializeStore() {
   return JSON.stringify(store, function(key, value) {
-    return key === "src" && this?.storageKey ? undefined : value;
+    if (key === "src" && this?.storageKey) return undefined;
+    if (key === "avatarImage" && this?.avatarStorageKey) return undefined;
+    if (key === "avatar" && this?.avatarStorageKey) return undefined;
+    if (key === "image" && this?.imageStorageKey) return undefined;
+    return value;
   });
 }
 function save() {
@@ -93,6 +108,38 @@ async function getStoredMedia(key) {
     request.onerror = () => reject(request.error);
   });
 }
+async function prepareStoredAsset(owner, sourceKey, storageKeyField, sourceField = sourceKey) {
+  const source = owner?.[sourceField];
+  const existingKey = owner?.[storageKeyField];
+  if (existingKey) {
+    try {
+      const file = await getStoredMedia(existingKey);
+      if (file) {
+        owner[sourceField] = URL.createObjectURL(file);
+        return;
+      }
+    } catch (error) {
+      console.error("图片资源读取失败", error);
+    }
+  }
+  if (typeof source !== "string" || !source.startsWith("data:")) return;
+  try {
+    const file = await (await fetch(source)).blob();
+    const storageKey = `blog-${sourceKey}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await storeMediaFile(storageKey, file);
+    owner[storageKeyField] = storageKey;
+    owner[sourceField] = URL.createObjectURL(file);
+    mediaMigrationNeeded = true;
+  } catch (error) {
+    console.error("图片资源迁移失败", error);
+  }
+}
+async function storePendingAsset(file, storageKey, owner, storageKeyField, sourceField) {
+  if (!file) return;
+  await storeMediaFile(storageKey, file);
+  owner[storageKeyField] = storageKey;
+  owner[sourceField] = URL.createObjectURL(file);
+}
 function prepareArticleMedia() {
   if (articleMediaReady) return articleMediaReady;
   articleMediaReady = (async () => {
@@ -117,9 +164,43 @@ function prepareArticleMedia() {
         }
       }
     }
-    if (migrated) save();
+    if (migrated) mediaMigrationNeeded = true;
   })();
   return articleMediaReady;
+}
+async function preparePersistentMedia() {
+  await prepareStoredAsset(store.profile, "profile-avatar", "avatarStorageKey", "avatarImage");
+  await prepareStoredAsset(store.reward, "reward-image", "imageStorageKey", "image");
+  for (const friend of store.friends) {
+    await prepareStoredAsset(friend, `friend-avatar-${friend.id}`, "avatarStorageKey", "avatar");
+  }
+  for (const friend of store.backupFriends) {
+    await prepareStoredAsset(friend, `backup-avatar-${friend.id}`, "avatarStorageKey", "avatar");
+  }
+  for (const item of store.coCreateArticles) {
+    for (let index = 0; index < (item.media?.length || 0); index += 1) {
+      const media = item.media[index];
+      if (media.storageKey) {
+        try {
+          const file = await getStoredMedia(media.storageKey);
+          if (file) media.src = URL.createObjectURL(file);
+        } catch (error) {
+          console.error("共创媒体读取失败", error);
+        }
+      } else if (media.src?.startsWith("data:")) {
+        try {
+          const file = await (await fetch(media.src)).blob();
+          const storageKey = `co-create-media-${item.id}-${index}-${Date.now()}`;
+          await storeMediaFile(storageKey, file);
+          media.storageKey = storageKey;
+          media.src = URL.createObjectURL(file);
+          mediaMigrationNeeded = true;
+        } catch (error) {
+          console.error("共创媒体迁移失败", error);
+        }
+      }
+    }
+  }
 }
 function avatarMarkup(className = "") {
   return store.profile.avatarImage
@@ -460,6 +541,7 @@ http://localhost:4173/`;
   }
   if (name === "reward") {
     if (isAdmin()) {
+      pendingRewardFile = null;
       modal("微信打赏", `<form id="reward-form" class="form-stack"><p class="confirm-copy">上传微信赞赏码后，游客可以在此处查看。</p><label class="form-label">赞赏码图片<button type="button" class="button button-light upload-button">选择图片<input id="reward-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><span class="form-help">支持 PNG、JPG、WEBP，大小不超过 2MB。</span><div id="reward-preview" class="reward-preview">${store.reward.image ? `<img src="${store.reward.image}" alt="当前微信赞赏码" />` : `<span>尚未上传</span>`}</div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存赞赏码</button></div></form>`);
     } else {
       modal("微信打赏", store.reward.image
@@ -496,10 +578,12 @@ http://localhost:4173/`;
   if (name === "guestbook") setPage("guestbook");
   if (name === "friend-backup") setPage("friend-backup");
   if (name === "friend-sign") {
+    pendingFriendAvatarFile = null;
     modal("游客留名", `<form id="friend-sign-form" class="form-stack"><label class="form-label">头像图片<button type="button" class="button button-light upload-button friend-avatar-upload">选择图片<input id="friend-avatar-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" required /></button><span class="form-help">支持 PNG、JPG、WEBP、GIF，大小不超过 2MB。</span><div id="friend-avatar-preview" class="friend-avatar-preview"></div></label><label class="form-label">名称<input class="form-input" name="name" maxlength="30" required placeholder="你的名称" /></label><label class="form-label">博客网址<input class="form-input" name="url" type="url" maxlength="300" required placeholder="https://your-blog.com" /></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存并返回</button></div></form>`);
   }
   if (name === "friend-add") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
+    pendingFriendAddAvatarFile = null;
     modal("添加好友博客", `<form id="friend-add-form" class="form-stack"><label class="form-label">头像或展示图片<button type="button" class="button button-light upload-button">选择图片<input id="friend-add-avatar-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" required /></button><span class="form-help">支持 PNG、JPG、WEBP、GIF，大小不超过 2MB。</span><div id="friend-add-avatar-preview" class="friend-avatar-preview"></div></label><label class="form-label">博客名称<input class="form-input" name="name" maxlength="30" required placeholder="输入博客名称" /></label><label class="form-label">博客网址<input class="form-input" name="url" type="url" maxlength="300" required placeholder="https://your-blog.com" /></label><label class="form-label">简介<textarea class="form-textarea compact-textarea" name="desc" maxlength="120" placeholder="输入博客简介"></textarea></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存好友</button></div></form>`);
   }
   if (name === "edit-announcement") {
@@ -518,6 +602,7 @@ http://localhost:4173/`;
   }
   if (name === "co-create-publish") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
+    pendingCoCreateMedia = [];
     modal("发布共创内容", `<form id="co-create-publish-form" class="form-stack"><label class="form-label">标题<input class="form-input" name="title" maxlength="80" required placeholder="输入共创内容标题" /></label><label class="form-label">正文<textarea class="form-textarea publish-content" name="body" maxlength="10000" required placeholder="输入共创内容正文"></textarea></label><label class="form-label">图片或视频<button type="button" class="button button-light upload-button media-upload-button">选择文件<input id="co-create-media" type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" multiple /></button><span class="form-help">支持 PNG、JPG、WEBP、MP4、WEBM；图片不超过 5MB，视频不超过 30MB。</span><div id="co-create-media-preview" class="media-preview"></div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">发布内容</button></div></form>`);
   }
   if (name === "guestbook-form") modal("留下足迹", `<form id="guestbook-form" class="form-stack"><label class="form-label">昵称<input class="form-input" name="name" required maxlength="20" /></label><label class="form-label">留言内容<textarea class="form-textarea" name="text" required maxlength="300"></textarea></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">提交留言</button></div></form>`);
@@ -706,9 +791,13 @@ document.addEventListener("click", e => {
     return;
   }
   if (e.target.id === "do-search") { const q = document.querySelector("#modal-search").value.trim(); closeModal(); location.href = q ? `#archive?q=${encodeURIComponent(q)}` : "#archive"; currentPage = "archive"; render(); }
-  if (e.target.id === "edit-profile") modal("编辑资料", `<form id="profile-form" class="form-stack"><div class="profile-editor-head"><div class="profile-preview" id="profile-preview">${avatarMarkup()}</div><div><button type="button" class="button button-light upload-button">选择头像<input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><p class="form-help">支持 PNG、JPG、WEBP，大小不超过 2MB。</p></div></div><label class="form-label">昵称<input class="form-input" name="name" value="${store.profile.name}" required /></label><label class="form-label">个性签名<textarea class="form-textarea" name="bio" required>${store.profile.bio}</textarea></label><label class="form-label">微信赞赏码<button type="button" class="button button-light upload-button">选择图片<input id="reward-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><span class="form-help">上传微信赞赏码图片，支持 PNG、JPG、WEBP，大小不超过 2MB。</span><div id="reward-preview" class="reward-preview">${store.reward.image ? `<img src="${store.reward.image}" alt="当前微信赞赏码" />` : `<span>尚未上传</span>`}</div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存资料</button></div></form>`);
+  if (e.target.id === "edit-profile") {
+    pendingProfileAvatarFile = null;
+    pendingProfileRewardFile = null;
+    modal("编辑资料", `<form id="profile-form" class="form-stack"><div class="profile-editor-head"><div class="profile-preview" id="profile-preview">${avatarMarkup()}</div><div><button type="button" class="button button-light upload-button">选择头像<input id="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><p class="form-help">支持 PNG、JPG、WEBP，大小不超过 2MB。</p></div></div><label class="form-label">昵称<input class="form-input" name="name" value="${store.profile.name}" required /></label><label class="form-label">个性签名<textarea class="form-textarea" name="bio" required>${store.profile.bio}</textarea></label><label class="form-label">微信赞赏码<button type="button" class="button button-light upload-button">选择图片<input id="reward-file" type="file" accept="image/png,image/jpeg,image/webp" /></button><span class="form-help">上传微信赞赏码图片，支持 PNG、JPG、WEBP，大小不超过 2MB。</span><div id="reward-preview" class="reward-preview">${store.reward.image ? `<img src="${store.reward.image}" alt="当前微信赞赏码" />` : `<span>尚未上传</span>`}</div></label><div class="modal-actions"><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存资料</button></div></form>`);
+  }
 });
-document.addEventListener("change", e => {
+document.addEventListener("change", async e => {
   if (e.target.id === "co-create-media") {
     const files = [...e.target.files];
     const allowed = ["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm"];
@@ -716,17 +805,14 @@ document.addEventListener("change", e => {
       e.target.value = "";
       return showToast("文件格式不支持或文件过大");
     }
-    const pending = [];
-    files.forEach(file => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        pending.push({ name: file.name, type: file.type.startsWith("video/") ? "video" : "image", src: reader.result });
-        e.target.dataset.pendingMedia = JSON.stringify(pending);
-        const preview = document.querySelector("#co-create-media-preview");
-        if (preview) preview.innerHTML = pending.map(media => media.type === "video" ? `<video controls src="${media.src}"></video>` : `<img src="${media.src}" alt="${media.name}" />`).join("");
-      };
-      reader.readAsDataURL(file);
-    });
+    pendingCoCreateMedia = files.map(file => ({
+      name: file.name,
+      type: file.type.startsWith("video/") ? "video" : "image",
+      file,
+      src: URL.createObjectURL(file)
+    }));
+    const preview = document.querySelector("#co-create-media-preview");
+    if (preview) preview.innerHTML = pendingCoCreateMedia.map(media => media.type === "video" ? `<video controls src="${media.src}"></video>` : `<img src="${media.src}" alt="${media.name}" />`).join("");
     return;
   }
   if (e.target.id === "friend-avatar-file") {
@@ -737,14 +823,10 @@ document.addEventListener("change", e => {
       e.target.value = "";
       return showToast("头像格式不支持或超过 2MB");
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const preview = document.querySelector("#friend-avatar-preview");
-      if (preview) preview.innerHTML = `<img src="${reader.result}" alt="头像预览" />`;
-      e.target.dataset.pendingAvatar = reader.result;
-      showToast("头像已加载");
-    };
-    reader.readAsDataURL(file);
+    pendingFriendAvatarFile = file;
+    const preview = document.querySelector("#friend-avatar-preview");
+    if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(file)}" alt="头像预览" />`;
+    showToast("头像已加载");
     return;
   }
   if (e.target.id === "friend-add-avatar-file") {
@@ -755,14 +837,10 @@ document.addEventListener("change", e => {
       e.target.value = "";
       return showToast("图片格式不支持或超过 2MB");
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const preview = document.querySelector("#friend-add-avatar-preview");
-      if (preview) preview.innerHTML = `<img src="${reader.result}" alt="好友头像预览" />`;
-      e.target.dataset.pendingAvatar = reader.result;
-      showToast("好友图片已加载");
-    };
-    reader.readAsDataURL(file);
+    pendingFriendAddAvatarFile = file;
+    const preview = document.querySelector("#friend-add-avatar-preview");
+    if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(file)}" alt="好友头像预览" />`;
+    showToast("好友图片已加载");
     return;
   }
   if (e.target.id !== "avatar-file") return;
@@ -773,14 +851,10 @@ document.addEventListener("change", e => {
     e.target.value = "";
     return showToast("头像格式不合法或超过 2MB");
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    const preview = document.querySelector("#profile-preview");
-    if (preview) preview.innerHTML = `<img src="${reader.result}" alt="头像预览" />`;
-    e.target.dataset.pendingAvatar = reader.result;
-    showToast("头像已加载，保存后生效");
-  };
-  reader.readAsDataURL(file);
+  pendingProfileAvatarFile = file;
+  const preview = document.querySelector("#profile-preview");
+  if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(file)}" alt="头像预览" />`;
+  showToast("头像已加载，保存后生效");
 });
 document.addEventListener("change", e => {
   if (e.target.id !== "reward-file") return;
@@ -791,14 +865,11 @@ document.addEventListener("change", e => {
     e.target.value = "";
     return showToast("赞赏码格式不合法或超过 2MB");
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    const preview = document.querySelector("#reward-preview");
-    if (preview) preview.innerHTML = `<img src="${reader.result}" alt="微信赞赏码预览" />`;
-    e.target.dataset.pendingReward = reader.result;
-    showToast("赞赏码已加载，保存后生效");
-  };
-  reader.readAsDataURL(file);
+  if (e.target.closest("#profile-form")) pendingProfileRewardFile = file;
+  else pendingRewardFile = file;
+  const preview = document.querySelector("#reward-preview");
+  if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(file)}" alt="微信赞赏码预览" />`;
+  showToast("赞赏码已加载，保存后生效");
 });
 document.addEventListener("change", async e => {
   if (e.target.id !== "article-media") return;
@@ -846,10 +917,21 @@ document.addEventListener("submit", async e => {
   }
   if (e.target.id === "reward-form") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
-    const rewardFile = e.target.querySelector("#reward-file");
-    if (!rewardFile?.dataset.pendingReward && !store.reward.image) return showToast("请先上传赞赏码");
-    if (rewardFile?.dataset.pendingReward) store.reward.image = rewardFile.dataset.pendingReward;
-    save();
+    if (!pendingRewardFile && !store.reward.image) return showToast("请先上传赞赏码");
+    const previousReward = { image: store.reward.image, imageStorageKey: store.reward.imageStorageKey };
+    try {
+      if (pendingRewardFile) {
+        await storePendingAsset(pendingRewardFile, `reward-image-${Date.now()}`, store.reward, "imageStorageKey", "image");
+      }
+    } catch (error) {
+      console.error("赞赏码保存失败", error);
+      return showToast("赞赏码保存失败，请重试");
+    }
+    if (!save()) {
+      Object.assign(store.reward, previousReward);
+      return;
+    }
+    pendingRewardFile = null;
     closeModal();
     showToast("赞赏码保存成功");
     return;
@@ -857,13 +939,30 @@ document.addEventListener("submit", async e => {
   if (e.target.id === "comment-form") { const data = new FormData(e.target); if (!data.get("text").trim()) return showToast("评论内容不能为空"); store.comments.push({ articleId: Number(currentPage.split("-")[1]), name: data.get("name"), text: data.get("text") }); save(); closeModal(); render(); showToast("评论发布成功"); }
   if (e.target.id === "profile-form") {
     const data = new FormData(e.target);
-    store.profile.name = data.get("name");
-    store.profile.bio = data.get("bio");
-    const avatarFile = e.target.querySelector("#avatar-file");
-    if (avatarFile?.dataset.pendingAvatar) store.profile.avatarImage = avatarFile.dataset.pendingAvatar;
-    const rewardFile = e.target.querySelector("#reward-file");
-    if (rewardFile?.dataset.pendingReward) store.reward.image = rewardFile.dataset.pendingReward;
-    save();
+    const previousProfile = { name: store.profile.name, bio: store.profile.bio, avatarImage: store.profile.avatarImage, avatarStorageKey: store.profile.avatarStorageKey };
+    const previousReward = { image: store.reward.image, imageStorageKey: store.reward.imageStorageKey };
+    store.profile.name = data.get("name").trim();
+    store.profile.bio = data.get("bio").trim();
+    try {
+      if (pendingProfileAvatarFile) {
+        await storePendingAsset(pendingProfileAvatarFile, `profile-avatar-${Date.now()}`, store.profile, "avatarStorageKey", "avatarImage");
+      }
+      if (pendingProfileRewardFile) {
+        await storePendingAsset(pendingProfileRewardFile, `reward-image-${Date.now()}`, store.reward, "imageStorageKey", "image");
+      }
+    } catch (error) {
+      console.error("资料图片保存失败", error);
+      Object.assign(store.profile, previousProfile);
+      Object.assign(store.reward, previousReward);
+      return showToast("资料图片保存失败，请重试");
+    }
+    if (!save()) {
+      Object.assign(store.profile, previousProfile);
+      Object.assign(store.reward, previousReward);
+      return;
+    }
+    pendingProfileAvatarFile = null;
+    pendingProfileRewardFile = null;
     closeModal();
     render();
     showToast("资料保存成功");
@@ -953,15 +1052,24 @@ document.addEventListener("submit", async e => {
     const data = new FormData(e.target);
     const name = data.get("name").trim();
     const url = data.get("url").trim();
-    const avatarFile = e.target.querySelector("#friend-avatar-file");
-    const avatar = avatarFile?.dataset.pendingAvatar;
-    if (!avatar) return showToast("请先上传头像");
+    if (!pendingFriendAvatarFile) return showToast("请先上传头像");
     let blogUrl;
     try { blogUrl = new URL(url); } catch { return showToast("博客网址格式不正确"); }
     if (!["http:", "https:"].includes(blogUrl.protocol)) return showToast("仅支持 http 或 https 地址");
     if (store.backupFriends.some(friend => friend.name.toLowerCase() === name.toLowerCase() || friend.url.toLowerCase() === blogUrl.href.toLowerCase())) return showToast("名称或博客网址已留名");
-    store.backupFriends.unshift({ id: Date.now(), name, avatar, url: blogUrl.href, date: new Date().toISOString().slice(0, 10) });
-    save();
+    const friend = { id: Date.now(), name, avatar: "", url: blogUrl.href, date: new Date().toISOString().slice(0, 10) };
+    try {
+      await storePendingAsset(pendingFriendAvatarFile, `backup-avatar-${friend.id}`, friend, "avatarStorageKey", "avatar");
+    } catch (error) {
+      console.error("留名头像保存失败", error);
+      return showToast("头像保存失败，请重试");
+    }
+    store.backupFriends.unshift(friend);
+    if (!save()) {
+      store.backupFriends.shift();
+      return;
+    }
+    pendingFriendAvatarFile = null;
     closeModal();
     setPage("friend-backup");
     showToast("留名成功");
@@ -972,15 +1080,24 @@ document.addEventListener("submit", async e => {
     const name = data.get("name").trim();
     const url = data.get("url").trim();
     const desc = data.get("desc").trim();
-    const avatarFile = e.target.querySelector("#friend-add-avatar-file");
-    const avatar = avatarFile?.dataset.pendingAvatar;
-    if (!name || !avatar) return showToast("好友信息不完整");
+    if (!name || !pendingFriendAddAvatarFile) return showToast("好友信息不完整");
     let blogUrl;
     try { blogUrl = new URL(url); } catch { return showToast("信息不正确"); }
     if (!["http:", "https:"].includes(blogUrl.protocol)) return showToast("信息不正确");
     if (store.friends.some(friend => friend.name.toLowerCase() === name.toLowerCase() || (friend.url && friend.url.toLowerCase() === blogUrl.href.toLowerCase()))) return showToast("好友名称或网址已存在");
-    store.friends.push({ id: `friend-${Date.now()}`, name, url: blogUrl.href, avatar, desc });
-    save();
+    const friend = { id: `friend-${Date.now()}`, name, url: blogUrl.href, avatar: "", desc };
+    try {
+      await storePendingAsset(pendingFriendAddAvatarFile, `friend-avatar-${friend.id}`, friend, "avatarStorageKey", "avatar");
+    } catch (error) {
+      console.error("好友图片保存失败", error);
+      return showToast("好友图片保存失败，请重试");
+    }
+    store.friends.push(friend);
+    if (!save()) {
+      store.friends.pop();
+      return;
+    }
+    pendingFriendAddAvatarFile = null;
     closeModal();
     setPage("friends");
     showToast("好友添加成功");
@@ -1043,17 +1160,33 @@ document.addEventListener("submit", async e => {
     const body = data.get("body").trim();
     if (!title || !body) return showToast("共创内容不完整");
     const now = new Date().toISOString();
-    const mediaInput = e.target.querySelector("#co-create-media");
+    const id = Date.now();
+    let media = [];
+    try {
+      media = await Promise.all(pendingCoCreateMedia.map(async (item, index) => {
+        const storageKey = `co-create-media-${id}-${index}`;
+        await storeMediaFile(storageKey, item.file);
+        return { name: item.name, type: item.type, storageKey, src: URL.createObjectURL(item.file) };
+      }));
+    } catch (error) {
+      console.error("共创媒体保存失败", error);
+      return showToast("媒体文件保存失败，请重试");
+    }
     store.coCreateArticles.unshift({
-      id: Date.now(),
+      id,
       title,
       body: body.split(/\r?\n/).map(paragraph => paragraph.trim()).filter(Boolean),
-      media: mediaInput?.dataset.pendingMedia ? JSON.parse(mediaInput.dataset.pendingMedia) : [],
+      media,
       createdAt: now,
       updatedAt: now
     });
     store.auditLogs.push({ action: "co-create-published", coCreateId: store.coCreateArticles[0].id, at: now, operator: "管理员" });
-    save();
+    if (!save()) {
+      store.coCreateArticles.shift();
+      store.auditLogs.pop();
+      return;
+    }
+    pendingCoCreateMedia = [];
     closeModal();
     setPage("co-create");
     showToast("共创内容发布成功");
@@ -1062,4 +1195,10 @@ document.addEventListener("submit", async e => {
 document.addEventListener("input", e => { if (e.target.id === "article-search") { const q = e.target.value.trim(); history.replaceState({}, "", q ? `#archive?q=${encodeURIComponent(q)}` : "#archive"); render(); } });
 document.addEventListener("click", e => { if (e.target.id === "guestbook-form") return; });
 window.addEventListener("hashchange", () => { const hash = location.hash.slice(1) || "home"; currentPage = hash.split("?")[0]; render({ animate: true }); window.scrollTo(0, 0); });
-document.addEventListener("DOMContentLoaded", async () => { await prepareArticleMedia(); render(); initDesktopPet(); });
+document.addEventListener("DOMContentLoaded", async () => {
+  await prepareArticleMedia();
+  await preparePersistentMedia();
+  if (mediaMigrationNeeded) save();
+  render();
+  initDesktopPet();
+});
