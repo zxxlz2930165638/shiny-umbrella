@@ -19,6 +19,12 @@ const seed = {
     { name: "山止川行", desc: "工程师的思考记录", avatar: "https://i.pravatar.cc/100?img=5" }
   ]
 };
+const githubContent = {
+  owner: "zxxlz2930165638",
+  repo: "shiny-umbrella",
+  branch: "main",
+  path: "content/site-data.json"
+};
 const store = JSON.parse(localStorage.getItem("qichi-blog") || "null") || seed;
 store.guestbook = (store.guestbook || []).map((message, index) => ({
   ...message,
@@ -42,6 +48,7 @@ store.auditLogs = store.auditLogs || [];
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 const auth = JSON.parse(sessionStorage.getItem("qichi-auth") || "null") || { mode: "guest" };
+let githubPublishToken = sessionStorage.getItem("qichi-github-publish-token") || "";
 let currentPage = location.hash.slice(1) || "home";
 let activeFilter = "全部";
 let pageTransitionTimer = null;
@@ -56,6 +63,8 @@ let articleMediaReady = null;
 let mediaDatabasePromise = null;
 let coCreateReviewPreview = { requestId: null, mode: "original" };
 let mediaMigrationNeeded = false;
+let githubSyncTimer = null;
+let githubSyncPromise = null;
 
 function serializeStore() {
   return JSON.stringify(store, function(key, value) {
@@ -69,6 +78,8 @@ function serializeStore() {
 function save() {
   try {
     localStorage.setItem("qichi-blog", serializeStore());
+    if (isAdmin()) localStorage.setItem("qichi-blog-pending-github", "true");
+    scheduleGithubSync();
     return true;
   } catch (error) {
     console.error("博客数据保存失败", error);
@@ -80,6 +91,169 @@ function saveAuth() { sessionStorage.setItem("qichi-auth", JSON.stringify(auth))
 function isAdmin() { return auth.mode === "admin"; }
 function isPublished(article) { return article.status !== "draft"; }
 function visibleArticles() { return isAdmin() ? store.articles : store.articles.filter(isPublished); }
+function githubContentUrl() {
+  return `https://raw.githubusercontent.com/${githubContent.owner}/${githubContent.repo}/${githubContent.branch}/${githubContent.path}`;
+}
+function githubApiUrl(path = githubContent.path) {
+  return `https://api.github.com/repos/${githubContent.owner}/${githubContent.repo}/contents/${path}`;
+}
+function githubHeaders() {
+  return githubPublishToken
+    ? { Accept: "application/vnd.github+json", Authorization: `Bearer ${githubPublishToken}`, "X-GitHub-Api-Version": "2022-11-28" }
+    : { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+}
+function normalizeStoreData() {
+  store.profile = store.profile || { ...seed.profile };
+  store.articles = Array.isArray(store.articles) ? store.articles : [];
+  store.comments = Array.isArray(store.comments) ? store.comments : [];
+  store.guestbook = (store.guestbook || []).map((message, index) => ({
+    ...message,
+    id: message.id || `guestbook-${index + 1}`,
+    status: message.status || "approved"
+  }));
+  store.backupFriends = (store.backupFriends || []).map((friend, index) => ({
+    ...friend,
+    id: friend.id || `backup-${index + 1}`
+  }));
+  store.friends = (store.friends || []).map((friend, index) => ({
+    ...friend,
+    id: friend.id || `friend-${index + 1}`
+  }));
+  store.announcement = store.announcement || null;
+  store.reward = store.reward || { image: "" };
+  if (!Array.isArray(store.coCreateArticles)) store.coCreateArticles = seed.coCreateArticles.map(item => ({ ...item, body: [...item.body], media: [...item.media] }));
+  store.coCreationRequests = store.coCreationRequests || [];
+  store.auditLogs = store.auditLogs || [];
+}
+async function loadGithubContent() {
+  if (localStorage.getItem("qichi-blog-pending-github") === "true") return false;
+  try {
+    const response = await fetch(`${githubContentUrl()}?v=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return false;
+    const remoteStore = await response.json();
+    if (!remoteStore || typeof remoteStore !== "object" || !Array.isArray(remoteStore.articles)) return false;
+    Object.keys(store).forEach(key => delete store[key]);
+    Object.assign(store, remoteStore);
+    normalizeStoreData();
+    localStorage.setItem("qichi-blog", serializeStore());
+    return true;
+  } catch (error) {
+    console.warn("GitHub 内容读取失败，已使用此设备的本地内容", error);
+    return false;
+  }
+}
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+function mediaExtension(file) {
+  const extension = file?.name?.split(".").pop();
+  if (extension && /^[a-z0-9]{1,8}$/i.test(extension)) return extension.toLowerCase();
+  return file?.type?.split("/")[1]?.replace("jpeg", "jpg") || "bin";
+}
+function remoteMediaPath(storageKey, file) {
+  return `assets/uploads/${storageKey.replace(/[^a-zA-Z0-9_-]/g, "-")}.${mediaExtension(file)}`;
+}
+async function uploadGithubFile(path, file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const response = await fetch(githubApiUrl(path), {
+    method: "PUT",
+    headers: { ...githubHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: `上传博客媒体：${file.name || path}`,
+      content: bytesToBase64(bytes),
+      branch: githubContent.branch
+    })
+  });
+  if (!response.ok) throw new Error(`GitHub 媒体上传失败 (${response.status})`);
+  return `https://raw.githubusercontent.com/${githubContent.owner}/${githubContent.repo}/${githubContent.branch}/${path}`;
+}
+async function publishAssetToGithub(snapshotOwner, localOwner, sourceField, storageKeyField) {
+  const source = localOwner?.[sourceField];
+  if (typeof source === "string" && /^https?:\/\//.test(source)) {
+    snapshotOwner[sourceField] = source;
+    delete snapshotOwner[storageKeyField];
+    return;
+  }
+  const storageKey = localOwner?.[storageKeyField];
+  let file = storageKey ? await getStoredMedia(storageKey) : null;
+  if (!file && typeof source === "string" && source.startsWith("data:")) file = await (await fetch(source)).blob();
+  if (!file) return;
+  snapshotOwner[sourceField] = await uploadGithubFile(remoteMediaPath(storageKey || `media-${Date.now()}`, file), file);
+  delete snapshotOwner[storageKeyField];
+}
+async function buildGithubSnapshot() {
+  const snapshot = JSON.parse(JSON.stringify(store));
+  snapshot.articles = snapshot.articles.filter(isPublished);
+  const publishedArticleIds = new Set(snapshot.articles.map(article => article.id));
+  snapshot.comments = snapshot.comments.filter(comment => publishedArticleIds.has(comment.articleId));
+  snapshot.guestbook = snapshot.guestbook.filter(message => message.status === "approved");
+  snapshot.backupFriends = [];
+  snapshot.coCreationRequests = [];
+  snapshot.auditLogs = [];
+  await publishAssetToGithub(snapshot.profile, store.profile, "avatarImage", "avatarStorageKey");
+  await publishAssetToGithub(snapshot.reward, store.reward, "image", "imageStorageKey");
+  for (let index = 0; index < store.friends.length; index += 1) {
+    await publishAssetToGithub(snapshot.friends[index], store.friends[index], "avatar", "avatarStorageKey");
+  }
+  for (let index = 0; index < store.backupFriends.length; index += 1) {
+    await publishAssetToGithub(snapshot.backupFriends[index], store.backupFriends[index], "avatar", "avatarStorageKey");
+  }
+  for (let articleIndex = 0; articleIndex < store.articles.length; articleIndex += 1) {
+    const article = store.articles[articleIndex];
+    for (let mediaIndex = 0; mediaIndex < (article.media?.length || 0); mediaIndex += 1) {
+      await publishAssetToGithub(snapshot.articles[articleIndex].media[mediaIndex], article.media[mediaIndex], "src", "storageKey");
+    }
+  }
+  for (let itemIndex = 0; itemIndex < store.coCreateArticles.length; itemIndex += 1) {
+    const item = store.coCreateArticles[itemIndex];
+    for (let mediaIndex = 0; mediaIndex < (item.media?.length || 0); mediaIndex += 1) {
+      await publishAssetToGithub(snapshot.coCreateArticles[itemIndex].media[mediaIndex], item.media[mediaIndex], "src", "storageKey");
+    }
+  }
+  return snapshot;
+}
+async function syncGithubContent({ notify = false } = {}) {
+  if (!githubPublishToken || !isAdmin()) return false;
+  if (githubSyncPromise) return githubSyncPromise;
+  githubSyncPromise = (async () => {
+    const existing = await fetch(`${githubApiUrl()}?ref=${githubContent.branch}`, { headers: githubHeaders() });
+    const existingData = existing.ok ? await existing.json() : null;
+    if (!existing.ok && existing.status !== 404) throw new Error(`GitHub 内容读取失败 (${existing.status})`);
+    const snapshot = await buildGithubSnapshot();
+    const content = bytesToBase64(new TextEncoder().encode(JSON.stringify(snapshot, null, 2)));
+    const response = await fetch(githubApiUrl(), {
+      method: "PUT",
+      headers: { ...githubHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "更新博客公开内容",
+        content,
+        branch: githubContent.branch,
+        ...(existingData?.sha ? { sha: existingData.sha } : {})
+      })
+    });
+    if (!response.ok) throw new Error(`GitHub 内容同步失败 (${response.status})`);
+    localStorage.removeItem("qichi-blog-pending-github");
+    if (notify) showToast("已同步到 GitHub，访客刷新后即可查看");
+    return true;
+  })().catch(error => {
+    console.error("GitHub 内容同步失败", error);
+    if (notify) showToast("同步失败，请检查发布令牌和仓库权限");
+    return false;
+  }).finally(() => {
+    githubSyncPromise = null;
+  });
+  return githubSyncPromise;
+}
+function scheduleGithubSync() {
+  if (!githubPublishToken || !isAdmin()) return;
+  clearTimeout(githubSyncTimer);
+  githubSyncTimer = setTimeout(() => syncGithubContent(), 800);
+}
 function openMediaDatabase() {
   if (mediaDatabasePromise) return mediaDatabasePromise;
   mediaDatabasePromise = new Promise((resolve, reject) => {
@@ -553,11 +727,21 @@ http://localhost:4173/`;
     if (!isAdmin()) {
       modal("登录博客后台", `<form id="login-form" class="form-stack"><p class="login-tip">管理员登录后可以编辑个人资料和管理博客内容。</p><label class="form-label">管理员密码<input class="form-input" name="password" type="password" autocomplete="current-password" required autofocus /></label><div class="modal-actions"><button type="button" class="button button-light" data-action="guest-mode">访客模式</button><button class="button button-primary">登录</button></div></form>`);
     } else {
-      modal("管理员账户", `<div class="form-stack"><div class="profile-editor-head"><div class="profile-preview">${avatarMarkup()}</div><p style="line-height:1.8;color:var(--muted)">${store.profile.name}，${store.profile.role}<br />当前已登录管理员模式。</p></div></div><div class="modal-actions"><button class="button button-light" data-close>关闭</button><button class="button button-light" data-action="logout">退出登录</button><button class="button button-primary" id="edit-profile">编辑资料</button></div>`);
+      modal("管理员账户", `<div class="form-stack"><div class="profile-editor-head"><div class="profile-preview">${avatarMarkup()}</div><p style="line-height:1.8;color:var(--muted)">${store.profile.name}，${store.profile.role}<br />当前已登录管理员模式。</p></div><div class="github-sync-status">${githubPublishToken ? "GitHub 发布同步已连接" : "尚未连接 GitHub 发布同步"}</div></div><div class="modal-actions"><button class="button button-light" data-close>关闭</button><button class="button button-light" data-action="logout">退出登录</button><button class="button button-light" data-action="github-sync-settings">${githubPublishToken ? "GitHub 同步" : "连接 GitHub"}</button><button class="button button-primary" id="edit-profile">编辑资料</button></div>`);
     }
   }
   if (name === "guest-mode") { auth.mode = "guest"; saveAuth(); closeModal(); showToast("已进入访客模式"); }
   if (name === "logout") { auth.mode = "guest"; saveAuth(); closeModal(); navState(); showToast("已退出登录"); }
+  if (name === "github-sync-settings") {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    modal("GitHub 内容同步", `<form id="github-sync-form" class="form-stack"><p class="confirm-copy">发布令牌只保存在本次浏览器会话中，不会上传到网站或提交到仓库。</p><label class="form-label">GitHub 发布令牌<input class="form-input" name="token" type="password" autocomplete="off" required placeholder="${githubPublishToken ? "已连接，粘贴新令牌可替换" : "粘贴仅限此仓库 Contents 写入权限的令牌"}" /></label><p class="form-help">仓库：${githubContent.owner}/${githubContent.repo} · 分支：${githubContent.branch}</p><div class="modal-actions"><button type="button" class="button button-light" data-action="github-disconnect">断开</button><button type="button" class="button button-light" data-close>取消</button><button class="button button-primary">保存并同步</button></div></form>`);
+  }
+  if (name === "github-disconnect") {
+    githubPublishToken = "";
+    sessionStorage.removeItem("qichi-github-publish-token");
+    closeModal();
+    showToast("已断开 GitHub 发布同步");
+  }
   if (name === "publish") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
     pendingArticleMedia = [];
@@ -915,6 +1099,16 @@ document.addEventListener("submit", async e => {
     showToast("登录成功，欢迎回来");
     return;
   }
+  if (e.target.id === "github-sync-form") {
+    if (!isAdmin()) return showToast("请先登录管理员账户");
+    const token = new FormData(e.target).get("token").trim() || githubPublishToken;
+    if (!token) return showToast("请填写 GitHub 发布令牌");
+    githubPublishToken = token;
+    sessionStorage.setItem("qichi-github-publish-token", githubPublishToken);
+    const synced = await syncGithubContent({ notify: true });
+    if (synced) closeModal();
+    return;
+  }
   if (e.target.id === "reward-form") {
     if (!isAdmin()) return showToast("请先登录管理员账户");
     if (!pendingRewardFile && !store.reward.image) return showToast("请先上传赞赏码");
@@ -1196,6 +1390,7 @@ document.addEventListener("input", e => { if (e.target.id === "article-search") 
 document.addEventListener("click", e => { if (e.target.id === "guestbook-form") return; });
 window.addEventListener("hashchange", () => { const hash = location.hash.slice(1) || "home"; currentPage = hash.split("?")[0]; render({ animate: true }); window.scrollTo(0, 0); });
 document.addEventListener("DOMContentLoaded", async () => {
+  if (!isAdmin()) await loadGithubContent();
   await prepareArticleMedia();
   await preparePersistentMedia();
   if (mediaMigrationNeeded) save();

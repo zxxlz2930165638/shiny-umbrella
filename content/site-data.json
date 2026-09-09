@@ -1,0 +1,116 @@
+{
+  "profile": {
+    "name": "林默",
+    "role": "独立写作者 · 产品设计师",
+    "bio": "把复杂的事情想简单，把平凡的日子过具体。",
+    "avatar": "林"
+  },
+  "announcement": {
+    "title": "欢迎来到栖迟博客",
+    "body": "这里记录生活、设计、阅读，以及那些值得被记住的小事。",
+    "version": 1,
+    "updatedAt": "2026-09-04T09:00:00+08:00"
+  },
+  "reward": {
+    "image": ""
+  },
+  "coCreateArticles": [
+    {
+      "id": 101,
+      "title": "一起补完这段关于慢生活的记录",
+      "body": [
+        "我们常常把节奏放慢理解为停止行动，其实它更像是一种重新选择注意力的方式。",
+        "当我们愿意把目光放回日常，那些微小但真实的感受便会慢慢浮现出来。"
+      ],
+      "media": [],
+      "createdAt": "2026-09-04T09:00:00+08:00",
+      "updatedAt": "2026-09-04T09:00:00+08:00"
+    }
+  ],
+  "articles": [
+    {
+      "id": 1,
+      "title": "给生活留一点不被安排的时间",
+      "date": "2026-08-28",
+      "read": 8,
+      "likes": 24,
+      "liked": false,
+      "tags": ["生活", "随笔"],
+      "summary": "我们总以为自由需要大片完整的时间，其实它也可以发生在一杯茶和一段散步之间。",
+      "body": [
+        "最近开始有意识地给每天留出一小块空白。不安排任务，不追赶进度，只是让注意力回到眼前。",
+        "有时候是下班后沿着河边走一圈，有时候是把手机放在另一个房间，认真读完几页书。那些看起来没有产出的时刻，反而让生活重新长出了纹理。"
+      ],
+      "cover": "https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": 2,
+      "title": "做一个更有温度的数字产品",
+      "date": "2026-08-16",
+      "read": 11,
+      "likes": 18,
+      "liked": false,
+      "tags": ["设计", "产品"],
+      "summary": "界面不只是功能的容器，它也应该照顾使用者当下的情绪和节奏。",
+      "body": [
+        "好的产品体验经常藏在一些不显眼的地方：一个合适的默认值，一句不责备人的错误提示，或者一个让人知道系统正在努力工作的加载状态。",
+        "设计师需要关注的不只是用户想完成什么，也包括他在完成这件事的路上感受如何。"
+      ],
+      "cover": "https://images.unsplash.com/photo-1558655146-9f40138edfeb?auto=format&fit=crop&w=900&q=80"
+    },
+    {
+      "id": 3,
+      "title": "夜航船：关于学习的一些小事",
+      "date": "2026-07-30",
+      "read": 6,
+      "likes": 31,
+      "liked": false,
+      "tags": ["学习", "方法"],
+      "summary": "学习不是把知识搬进脑子，而是逐渐改变自己看待世界的方式。",
+      "body": [
+        "我喜欢把学习想象成一艘夜航船。你不总能看清岸边的景物，但知道自己正在向某个方向移动。",
+        "重要的不是一次读完多少，而是每隔一段时间回头看，发现自己已经能够提出更好的问题。"
+      ],
+      "cover": "https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=900&q=80"
+    }
+  ],
+  "comments": [
+    {
+      "articleId": 1,
+      "name": "周末散步者",
+      "text": "很喜欢这句：让注意力回到眼前。"
+    }
+  ],
+  "guestbook": [
+    {
+      "id": "guestbook-1",
+      "name": "一颗小树",
+      "text": "路过，祝博客越写越好。",
+      "date": "2026-09-01",
+      "status": "approved"
+    }
+  ],
+  "backupFriends": [],
+  "friends": [
+    {
+      "id": "friend-1",
+      "name": "纸上造物",
+      "desc": "关于设计和生活",
+      "avatar": "https://i.pravatar.cc/100?img=32"
+    },
+    {
+      "id": "friend-2",
+      "name": "慢慢写字",
+      "desc": "读书、摄影与远方",
+      "avatar": "https://i.pravatar.cc/100?img=12"
+    },
+    {
+      "id": "friend-3",
+      "name": "山止川行",
+      "desc": "工程师的思考记录",
+      "avatar": "https://i.pravatar.cc/100?img=5"
+    }
+  ],
+  "coCreationRequests": [],
+  "auditLogs": []
+}
